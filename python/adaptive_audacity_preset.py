@@ -345,6 +345,9 @@ def create_gain_curve(
     # Медиана prominence для нормализации gain
     median_prominence = statistics.median([p for p in limited_prominences if p > 0]) or 1.0
 
+    # Максимальная частота для активного маскирования (только бас)
+    max_mask_frequency = 160.0
+
     for index, target_frequency in enumerate(preset_frequencies):
         speaker_level = interpolate_log_curve(speaker_response, target_frequency)
         desired_mask_level = smooth_masking_curve[index]
@@ -356,8 +359,9 @@ def create_gain_curve(
         # Частота считается активным шумом, если:
         # 1. prominence > 3 dB
         # 2. prominence > local_env - 2 dB
-        # 3. speaker_level > -4 dB (не room mode)
-        if prominence < 3.0 or prominence < (local_env - 2.0) or speaker_level < -4.0:
+        # 3. speaker_level <= -5 dB (room mode)
+        # 4. target_frequency > max_mask_frequency (выше баса)
+        if target_frequency > max_mask_frequency or prominence < 3.0 or prominence < (local_env - 2.0) or speaker_level <= -5.0:
             raw_gain = minimum_gain
         else:
             # Gain = разница между prominence и медианой, масштабированное на masking_margin
@@ -374,12 +378,38 @@ def create_gain_curve(
             "raw_gain": raw_gain
         })
 
-    # 5. Финальное сглаживание купола
+    # 5. Плавный спад на высоких частотах (roll-off)
+    # Вместо резкого обреза создаём плавный спад от max_mask_frequency до max_mask_frequency * 2
+    roll_off_start = max_mask_frequency
+    roll_off_end = max_mask_frequency * 2.0
+
+    for index, target_frequency in enumerate(preset_frequencies):
+        if target_frequency > roll_off_start and target_frequency <= roll_off_end:
+            # Линейный спад в логарифмическом масштабе
+            log_start = math.log2(roll_off_start)
+            log_end = math.log2(roll_off_end)
+            log_freq = math.log2(target_frequency)
+            roll_off_factor = 1.0 - (log_freq - log_start) / (log_end - log_start)
+            if raw_gains[index] > minimum_gain:
+                raw_gains[index] = raw_gains[index] * roll_off_factor + minimum_gain * (1.0 - roll_off_factor)
+        elif target_frequency > roll_off_end:
+            raw_gains[index] = minimum_gain
+
+    # 6. Финальное сглаживание купола
     gains = gaussian_smooth_log_curve(preset_frequencies, raw_gains, curve_smoothing)
     for index, gain in enumerate(gains):
+        # Восстанавливаем minimum_gain для частот, где raw_gain был minimum_gain
+        # И для соседних частот, которые были размазаны
         if raw_gains[index] == minimum_gain:
             gains[index] = minimum_gain
-        gains[index] = clamp(gain, minimum_gain, maximum_gain)
+        else:
+            # Проверяем соседей — если хотя бы один сосед имеет minimum_gain,
+            # уменьшаем gain на 50% для более плавного спада
+            left_gain = raw_gains[index - 1] if index > 0 else minimum_gain
+            right_gain = raw_gains[index + 1] if index < len(raw_gains) - 1 else minimum_gain
+            if left_gain == minimum_gain or right_gain == minimum_gain:
+                gains[index] = (gains[index] + minimum_gain) / 2.0
+            gains[index] = clamp(gain, minimum_gain, maximum_gain)
         diagnostics[index]["final_gain"] = gains[index]
 
     return preset_frequencies, gains, diagnostics, raw_prominences, limited_prominences
