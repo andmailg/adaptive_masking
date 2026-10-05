@@ -257,35 +257,41 @@ def gaussian_smooth_log_curve(frequencies: list[float], values: list[float], sig
 
 
 # ============================================================
-# Автоматический динамический расчет превышения шума
+# Автоматический динамический расчет маскирующей кривой
 # ============================================================
 
-def get_percentile_prominence_dynamic(
+def get_spectrum_level(
+    spectra: list[tuple[list[float], list[float]]],
+    target_frequency: float
+) -> float:
+    """
+    Вычисляет средний уровень спектра на целевой частоте.
+    """
+    levels = []
+    for frequencies, spectrum_levels in spectra:
+        level = smooth_spectrum_at(frequencies, spectrum_levels, target_frequency)
+        levels.append(level)
+    return sum(levels) / len(levels)
+
+
+def get_noise_floor(
     spectra: list[tuple[list[float], list[float]]],
     target_frequency: float,
-    profile: dict
-) -> tuple[float, float, list[float]]:
+    window_octaves: float = 1.0
+) -> float:
     """
-    Вычисляет превышение над динамическим порогом тишины.
+    Вычисляет уровень "пола" тишины в окрестности целевой частоты.
     """
-    relative_prominences = []
-    absolute_levels = []
-
-    for frequencies, levels in spectra:
-        # Автоматический поиск уровня "пола" тишины (5-й процентиль самых тихих участков)
-        dynamic_baseline = percentile(levels, 5.0) 
-        
-        spectrum_level = smooth_spectrum_at(frequencies, levels, target_frequency)
-        prominence = max(0.0, spectrum_level - dynamic_baseline)
-        
-        relative_prominences.append(prominence)
-        absolute_levels.append(spectrum_level)
-
-    percentile_value = float(profile.get("spectrum_percentile", 90.0))
-    high_percentile = percentile(relative_prominences, percentile_value)
-    absolute_percentile = percentile(absolute_levels, percentile_value)
-
-    return high_percentile, absolute_percentile, relative_prominences
+    floor_levels = []
+    for frequencies, spectrum_levels in spectra:
+        local_levels = []
+        for f, l in zip(frequencies, spectrum_levels):
+            distance_octaves = abs(math.log2(f / target_frequency))
+            if distance_octaves <= window_octaves:
+                local_levels.append(l)
+        if local_levels:
+            floor_levels.append(percentile(local_levels, 10.0))
+    return sum(floor_levels) / len(floor_levels)
 
 
 # ============================================================
@@ -308,20 +314,22 @@ def create_gain_curve(
     minimum_gain = float(profile.get("min_gain", -24.0))
     maximum_gain = float(profile.get("max_gain", 4.0))
 
-    raw_prominences = []
-    absolute_percentile_levels = []
-    all_relative_values = []
-
-    # 1. Сбор данных на основе динамического процентиля тишины
+    # 1. Сбор уровней спектра на каждой частоте
+    spectrum_levels = []
+    noise_floors = []
     for target_frequency in preset_frequencies:
-        prominence_percentile, absolute_level, values = (
-            get_percentile_prominence_dynamic(spectra, target_frequency, profile)
-        )
-        raw_prominences.append(prominence_percentile)
-        absolute_percentile_levels.append(absolute_level)
-        all_relative_values.append(values)
+        level = get_spectrum_level(spectra, target_frequency)
+        floor = get_noise_floor(spectra, target_frequency)
+        spectrum_levels.append(level)
+        noise_floors.append(floor)
 
-    # 2. Защита от узких пиков
+    # 2. Расчёт prominence (превышение над локальным фоном)
+    raw_prominences = []
+    for i, target_frequency in enumerate(preset_frequencies):
+        prominence = max(0.0, spectrum_levels[i] - noise_floors[i])
+        raw_prominences.append(prominence)
+
+    # 3. Защита от узких пиков
     limited_prominences = []
     for index, target_frequency in enumerate(preset_frequencies):
         local_median = median_in_log_window(
@@ -330,104 +338,39 @@ def create_gain_curve(
         limited_value = min(raw_prominences[index], local_median + narrow_peak_limit)
         limited_prominences.append(limited_value)
 
-    # 3. Расчет целевой маски
-    raw_masking_curve = []
-    for prominence in limited_prominences:
-        desired_mask_level = max(minimum_mask, prominence + masking_margin)
-        raw_masking_curve.append(desired_mask_level)
-
-    smooth_masking_curve = gaussian_smooth_log_curve(preset_frequencies, raw_masking_curve, curve_smoothing)
-
-    # 4. Отсечка зон тишины с локальным пик-детектором (убирает полку на инфрабасе)
+    # 4. Расчёт gain: чем громче шум, тем выше gain
+    # Gain = prominence + masking_margin (без компенсации speaker_response)
+    # Если prominence < 3 dB, gain = minimum_gain (шум слишком тихий для маскировки)
     raw_gains = []
     diagnostics = []
 
-    # Медиана prominence для нормализации gain
-    median_prominence = statistics.median([p for p in limited_prominences if p > 0]) or 1.0
-
-    # Максимальная частота для активного маскирования (только бас)
-    max_mask_frequency = 125.0
-
-    # Находим пиковую частоту для формирования колокола
-    active_indices = []
     for index, target_frequency in enumerate(preset_frequencies):
         speaker_level = interpolate_log_curve(speaker_response, target_frequency)
         prominence = limited_prominences[index]
-        if target_frequency <= max_mask_frequency and prominence >= 3.0 and speaker_level > -5.0:
-            active_indices.append(index)
 
-    if active_indices:
-        peak_index = max(active_indices, key=lambda i: limited_prominences[i])
-        peak_frequency = preset_frequencies[peak_index]
-    else:
-        peak_frequency = 100.0
-
-    for index, target_frequency in enumerate(preset_frequencies):
-        speaker_level = interpolate_log_curve(speaker_response, target_frequency)
-        desired_mask_level = smooth_masking_curve[index]
-        prominence = limited_prominences[index]
-
-        # Ищем локальную медиану вокруг текущей частоты в пределах 1 октавы
-        local_env = median_in_log_window(preset_frequencies, limited_prominences, target_frequency, 1.0)
-
-        # Частота считается активным шумом, если:
-        # 1. prominence > 3 dB
-        # 2. prominence > local_env - 2 dB
-        # 3. speaker_level > -5 dB (не room mode)
-        # 4. target_frequency <= max_mask_frequency (только бас)
-        if target_frequency > max_mask_frequency or prominence < 3.0 or prominence < (local_env - 2.0) or speaker_level <= -5.0:
+        # Gain = prominence + masking_margin, но только если prominence > 5 dB
+        if prominence < 5.0:
             raw_gain = minimum_gain
         else:
-            # Гауссова колоколообразная форма: пик на peak_frequency, спад к краям
-            distance_octaves = math.log2(target_frequency / peak_frequency)
-            sigma = 0.5  # ширина колокола в октавах
-            bell_factor = math.exp(-0.5 * (distance_octaves / sigma) ** 2)
-            # Базовый gain 6 dB, масштабируется bell_factor
-            raw_gain = 6.0 * bell_factor + level_offset
+            raw_gain = prominence + masking_margin + level_offset
 
         raw_gains.append(raw_gain)
         diagnostics.append({
             "frequency": target_frequency,
-            "percentile_level": absolute_percentile_levels[index],
+            "percentile_level": spectrum_levels[index],
             "raw_prominence": raw_prominences[index],
             "limited_prominence": limited_prominences[index],
-            "masking_level": desired_mask_level,
+            "masking_level": prominence + masking_margin,
             "speaker_response": speaker_level,
             "raw_gain": raw_gain
         })
 
-    # 5. Плавный спад на высоких частотах (roll-off)
-    # Вместо резкого обреза создаём плавный спад от max_mask_frequency до max_mask_frequency * 2
-    roll_off_start = max_mask_frequency
-    roll_off_end = max_mask_frequency * 2.0
-
-    for index, target_frequency in enumerate(preset_frequencies):
-        if target_frequency > roll_off_start and target_frequency <= roll_off_end:
-            # Линейный спад в логарифмическом масштабе
-            log_start = math.log2(roll_off_start)
-            log_end = math.log2(roll_off_end)
-            log_freq = math.log2(target_frequency)
-            roll_off_factor = 1.0 - (log_freq - log_start) / (log_end - log_start)
-            if raw_gains[index] > minimum_gain:
-                raw_gains[index] = raw_gains[index] * roll_off_factor + minimum_gain * (1.0 - roll_off_factor)
-        elif target_frequency > roll_off_end:
-            raw_gains[index] = minimum_gain
-
-    # 6. Финальное сглаживание купола
-    gains = gaussian_smooth_log_curve(preset_frequencies, raw_gains, curve_smoothing)
+    # 5. Финальное сглаживание купола (только если curve_smoothing > 0)
+    gains = list(raw_gains)
+    if curve_smoothing > 0:
+        gains = gaussian_smooth_log_curve(preset_frequencies, gains, curve_smoothing)
     for index, gain in enumerate(gains):
-        # Восстанавливаем minimum_gain для частот, где raw_gain был minimum_gain
-        # И для соседних частот, которые были размазаны
-        if raw_gains[index] == minimum_gain:
-            gains[index] = minimum_gain
-        else:
-            # Проверяем соседей — если хотя бы один сосед имеет minimum_gain,
-            # уменьшаем gain на 50% для более плавного спада
-            left_gain = raw_gains[index - 1] if index > 0 else minimum_gain
-            right_gain = raw_gains[index + 1] if index < len(raw_gains) - 1 else minimum_gain
-            if left_gain == minimum_gain or right_gain == minimum_gain:
-                gains[index] = (gains[index] + minimum_gain) / 2.0
-            gains[index] = clamp(gain, minimum_gain, maximum_gain)
+        gains[index] = clamp(gain, minimum_gain, maximum_gain)
         diagnostics[index]["final_gain"] = gains[index]
 
     return preset_frequencies, gains, diagnostics, raw_prominences, limited_prominences
