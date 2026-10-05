@@ -59,11 +59,6 @@
         [20000, -10.0]
     ],
 
-    "baseline_band": [
-        250,
-        500
-    ],
-
     "spectrum_percentile": 90,
 
     "masking_margin_db": 3.0,
