@@ -1,0 +1,5 @@
+"spectrum_percentile": 95,
+"masking_margin_db": 5.0,
+"minimum_mask_db": 3.0,
+"narrow_peak_limit_db": 5.0,
+"curve_smoothing_octaves": 0.25
