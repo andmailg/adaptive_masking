@@ -368,21 +368,11 @@ def create_gain_curve(
             "raw_gain": raw_gain
         })
 
-    # 5. Центровка только по частотам с реальным шумом
-    active_gains = [g for g in raw_gains if g > minimum_gain]
-    reference_gain = statistics.median(active_gains) if active_gains else 0.0
-
-    gains = []
-    for index, raw_gain in enumerate(raw_gains):
-        if raw_gain == minimum_gain:
-            gains.append(minimum_gain)
-        else:
-            gain = clamp(raw_gain - reference_gain, minimum_gain, maximum_gain)
-            gains.append(gain)
-
-    # 6. Финальное сглаживание купола
-    gains = gaussian_smooth_log_curve(preset_frequencies, gains, curve_smoothing)
+    # 5. Финальное сглаживание купола
+    gains = gaussian_smooth_log_curve(preset_frequencies, raw_gains, curve_smoothing)
     for index, gain in enumerate(gains):
+        if raw_gains[index] == minimum_gain:
+            gains[index] = minimum_gain
         gains[index] = clamp(gain, minimum_gain, maximum_gain)
         diagnostics[index]["final_gain"] = gains[index]
 
