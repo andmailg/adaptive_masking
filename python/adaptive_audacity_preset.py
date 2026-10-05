@@ -266,7 +266,7 @@ def get_percentile_prominence_dynamic(
     profile: dict
 ) -> tuple[float, float, list[float]]:
     """
-    Вычисляет превышение над динамическим порогом тишины (без baseline_band).
+    Вычисляет превышение над динамическим порогом тишины.
     """
     relative_prominences = []
     absolute_levels = []
@@ -353,13 +353,15 @@ def create_gain_curve(
         # Ищем локальную медиану вокруг текущей частоты в пределах 1 октавы
         local_env = median_in_log_window(preset_frequencies, limited_prominences, target_frequency, 1.0)
 
-        # Частота считается активным шумом, если она явно выделяется на общем фоне
-        # и уровень prominence имеет физический смысл (выше 3 дБ)
-        if prominence < 3.0 or prominence < (local_env - 2.0):
+        # Частота считается активным шумом, если:
+        # 1. prominence > 3 dB
+        # 2. prominence > local_env - 2 dB
+        # 3. speaker_level > -4 dB (не room mode)
+        if prominence < 3.0 or prominence < (local_env - 2.0) or speaker_level < -4.0:
             raw_gain = minimum_gain
         else:
-            # Логарифмическое масштабирование prominence для предотвращения обрезки
-            raw_gain = (math.log2(prominence) - math.log2(median_prominence)) * masking_margin + level_offset
+            # Gain = разница между prominence и медианой, масштабированное на masking_margin
+            raw_gain = (prominence - median_prominence) + masking_margin + level_offset
 
         raw_gains.append(raw_gain)
         diagnostics.append({
