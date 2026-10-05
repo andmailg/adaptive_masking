@@ -65,11 +65,11 @@
 
     "minimum_mask_db": 2.0,
 
-    "narrow_peak_limit_db": 4.0,
+    "narrow_peak_limit_db": 2.0,
 
     "peak_detection_window_octaves": 0.35,
 
-    "curve_smoothing_octaves": 0.30,
+    "curve_smoothing_octaves": 0.0,
 
     "level_offset_db": 0.0,
 

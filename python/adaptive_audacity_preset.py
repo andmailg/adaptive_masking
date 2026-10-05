@@ -346,7 +346,21 @@ def create_gain_curve(
     median_prominence = statistics.median([p for p in limited_prominences if p > 0]) or 1.0
 
     # Максимальная частота для активного маскирования (только бас)
-    max_mask_frequency = 160.0
+    max_mask_frequency = 125.0
+
+    # Находим пиковую частоту для формирования колокола
+    active_indices = []
+    for index, target_frequency in enumerate(preset_frequencies):
+        speaker_level = interpolate_log_curve(speaker_response, target_frequency)
+        prominence = limited_prominences[index]
+        if target_frequency <= max_mask_frequency and prominence >= 3.0 and speaker_level > -5.0:
+            active_indices.append(index)
+
+    if active_indices:
+        peak_index = max(active_indices, key=lambda i: limited_prominences[i])
+        peak_frequency = preset_frequencies[peak_index]
+    else:
+        peak_frequency = 100.0
 
     for index, target_frequency in enumerate(preset_frequencies):
         speaker_level = interpolate_log_curve(speaker_response, target_frequency)
@@ -359,13 +373,17 @@ def create_gain_curve(
         # Частота считается активным шумом, если:
         # 1. prominence > 3 dB
         # 2. prominence > local_env - 2 dB
-        # 3. speaker_level <= -5 dB (room mode)
-        # 4. target_frequency > max_mask_frequency (выше баса)
+        # 3. speaker_level > -5 dB (не room mode)
+        # 4. target_frequency <= max_mask_frequency (только бас)
         if target_frequency > max_mask_frequency or prominence < 3.0 or prominence < (local_env - 2.0) or speaker_level <= -5.0:
             raw_gain = minimum_gain
         else:
-            # Gain = разница между prominence и медианой, масштабированное на masking_margin
-            raw_gain = (prominence - median_prominence) + masking_margin + level_offset
+            # Гауссова колоколообразная форма: пик на peak_frequency, спад к краям
+            distance_octaves = math.log2(target_frequency / peak_frequency)
+            sigma = 0.5  # ширина колокола в октавах
+            bell_factor = math.exp(-0.5 * (distance_octaves / sigma) ** 2)
+            # Базовый gain 6 dB, масштабируется bell_factor
+            raw_gain = 6.0 * bell_factor + level_offset
 
         raw_gains.append(raw_gain)
         diagnostics.append({
