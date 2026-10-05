@@ -355,7 +355,7 @@ def create_gain_curve(
         if prominence < 3.0 or prominence < (local_env - 2.0):
             raw_gain = minimum_gain
         else:
-            raw_gain = desired_mask_level - speaker_level + level_offset
+            raw_gain = prominence + masking_margin + level_offset
 
         raw_gains.append(raw_gain)
         diagnostics.append({
