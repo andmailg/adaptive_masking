@@ -343,7 +343,7 @@ def create_gain_curve(
     diagnostics = []
 
     # Медиана prominence для нормализации gain
-    median_prominence = statistics.median(limited_prominences)
+    median_prominence = statistics.median([p for p in limited_prominences if p > 0]) or 1.0
 
     for index, target_frequency in enumerate(preset_frequencies):
         speaker_level = interpolate_log_curve(speaker_response, target_frequency)
@@ -358,8 +358,8 @@ def create_gain_curve(
         if prominence < 3.0 or prominence < (local_env - 2.0):
             raw_gain = minimum_gain
         else:
-            # Относительный gain: prominence относительно медианы, смещённый на masking_margin
-            raw_gain = prominence - median_prominence + masking_margin + level_offset
+            # Логарифмическое масштабирование prominence для предотвращения обрезки
+            raw_gain = (math.log2(prominence) - math.log2(median_prominence)) * masking_margin + level_offset
 
         raw_gains.append(raw_gain)
         diagnostics.append({

@@ -74,7 +74,7 @@
     "level_offset_db": 0.0,
 
     "min_gain": -24.0,
-    "max_gain": 4.0,
+    "max_gain": 6.0,
 
     "filter_length": 8191,
     "interpolate_lin": 0,
