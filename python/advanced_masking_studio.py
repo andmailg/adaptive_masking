@@ -520,6 +520,7 @@ class AdvancedMaskingStudio(tk.Tk):
         # Определяем путь к профилю (устройство или произвольный файл)
         selected_device = self.json_path.get()
         profile_path = None
+        speaker_response = None
 
         if selected_device in self.device_names:
             # Загружаем профиль из единого JSON-файла
@@ -714,9 +715,9 @@ class AdvancedMaskingStudio(tk.Tk):
             )
 
             max_boost = (
-                max(p for p in self.calculated_points)
+                max(p[1] for p in self.calculated_points)
                 if self.calculated_points
-                else 0
+                else 0.0
             )
             filtered_chunk = base_noise.apply_gain(max_boost - 3.0)
             total_loops = int((10 * 60 * 1000) / duration_ms)
