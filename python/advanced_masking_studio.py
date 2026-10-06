@@ -88,13 +88,14 @@ def interpolate_speaker_response(
 
 
 def build_normalized_preset_dynamic(
-    profile_path: str,
+    profile_path: str | None,
     spectrum_paths: list[str],
     max_peak_limit: float,
     min_db_threshold: float,
     min_gain: float,
     masking_margin: float,
     filter_length: int,
+    speaker_response: dict | None = None,
 ):
     """Строит форму купола с двухсторонним сглаживанием по чистой АЧХ из JSON."""
     base_peaks, peaks_details = get_all_spectrum_peaks_dynamic(
@@ -109,13 +110,15 @@ def build_normalized_preset_dynamic(
             if 55 <= check_freq <= 160:
                 dense_frequencies.add(check_freq)
 
-    with open(profile_path, "r", encoding="utf-8") as f:
-        profile = json.load(f)
-
-    # Защищенное извлечение только АЧХ, игнорируя любые другие лишние ключи
-    speaker_response = {
-        int(k): v for k, v in profile.get("speaker_response", [])
-    }
+    # Загружаем speaker_response: из параметра или из файла
+    if speaker_response is None:
+        if profile_path is None:
+            raise ValueError("profile_path must be provided when speaker_response is not given")
+        with open(profile_path, "r", encoding="utf-8") as f:
+            profile = json.load(f)
+        speaker_response = {
+            int(k): v for k, v in profile.get("speaker_response", [])
+        }
 
     preset_points = []
     raw_points = {}
@@ -221,6 +224,9 @@ class AdvancedMaskingStudio(tk.Tk):
         self.json_path = tk.StringVar()
         self.spectrum_files = []
         self.calculated_points = []
+        self.profiles_file = Path(__file__).parent / "speaker_profiles.json"
+        self.device_names = []
+        self._load_devices()
 
         # Конфигурация переменных интерфейса
         self.max_peak_limit_var = tk.DoubleVar(value=0.0)
@@ -243,11 +249,20 @@ class AdvancedMaskingStudio(tk.Tk):
         ttk.Label(file_frame, text="Профиль (JSON):").grid(
             row=0, column=0, sticky="w", pady=5
         )
-        ttk.Entry(file_frame, textvariable=self.json_path, width=28).grid(
-            row=0, column=1, padx=5, pady=5
+        self.profile_combo = ttk.Combobox(
+            file_frame,
+            textvariable=self.json_path,
+            values=self.device_names,
+            width=20,
+            state="readonly",
         )
+        self.profile_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_device_select)
         ttk.Button(file_frame, text="Обзор...", command=self._browse_json).grid(
             row=0, column=2, padx=2, pady=5
+        )
+        ttk.Button(file_frame, text="+ Устройство", command=self._add_device).grid(
+            row=0, column=3, padx=2, pady=5
         )
 
         ttk.Label(file_frame, text="Спектры (TXT):").grid(
@@ -355,6 +370,20 @@ class AdvancedMaskingStudio(tk.Tk):
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.right_panel)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
+    def _load_devices(self):
+        """Загружает список устройств из единого JSON-файла профилей."""
+        self.device_names = []
+        if self.profiles_file.exists():
+            with open(self.profiles_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.device_names = sorted(data.get("profiles", {}).keys())
+        if self.device_names:
+            self.json_path.set(self.device_names[0])
+
+    def _on_device_select(self, event=None):
+        """Обработчик выбора устройства из списка."""
+        pass  # textvariable уже обновляется автоматически
+
     def _browse_json(self):
         """Открывает диалоговое окно для выбора JSON-профиля."""
         filename = filedialog.askopenfilename(
@@ -363,6 +392,66 @@ class AdvancedMaskingStudio(tk.Tk):
         )
         if filename:
             self.json_path.set(filename)
+
+    def _add_device(self):
+        """Открывает диалог для добавления нового устройства."""
+        add_win = tk.Toplevel(self)
+        add_win.title("Добавить устройство")
+        add_win.geometry("380x320")
+        add_win.resizable(False, False)
+        add_win.transient(self)
+        add_win.grab_set()
+
+        ttk.Label(add_win, text="Название устройства:").pack(pady=(10, 2))
+        name_entry = ttk.Entry(add_win, width=40)
+        name_entry.pack(pady=2)
+
+        ttk.Label(add_win, text="АЧХ (частота,дБ, строка):").pack(pady=(10, 2))
+        text_area = tk.Text(add_win, height=10, width=45)
+        text_area.pack(pady=2, padx=10)
+
+        def save_device():
+            name = name_entry.get().strip()
+            raw = text_area.get("1.0", tk.END).strip()
+            if not name:
+                messagebox.showwarning("Ошибка", "Введите название устройства!")
+                return
+            if not raw:
+                messagebox.showwarning("Ошибка", "Введите данные АЧХ!")
+                return
+
+            pairs = []
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parts = line.replace(",", " ").replace("\t", " ").split()
+                    freq = int(float(parts[0]))
+                    gain = float(parts[1])
+                    pairs.append([freq, gain])
+                except (ValueError, IndexError):
+                    messagebox.showwarning("Ошибка", f"Некорректная строка: {line}")
+                    return
+
+            if not pairs:
+                messagebox.showwarning("Ошибка", "Нет данных для сохранения!")
+                return
+
+            with open(self.profiles_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            data["profiles"][name] = pairs
+            with open(self.profiles_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+
+            self.device_names.append(name)
+            self.profile_combo["values"] = self.device_names
+            self.json_path.set(name)
+            add_win.destroy()
+            messagebox.showinfo("Успех", f"Устройство '{name}' добавлено!")
+
+        ttk.Button(add_win, text="Сохранить", command=save_device).pack(pady=10)
 
     def _browse_spectra(self):
         """Открывает окно выбора нескольких текстовых файлов спектра."""
@@ -428,15 +517,33 @@ class AdvancedMaskingStudio(tk.Tk):
             )
             return
 
+        # Определяем путь к профилю (устройство или произвольный файл)
+        selected_device = self.json_path.get()
+        profile_path = None
+
+        if selected_device in self.device_names:
+            # Загружаем профиль из единого JSON-файла
+            with open(self.profiles_file, "r", encoding="utf-8") as f:
+                profiles_data = json.load(f)
+            speaker_response = {
+                int(k): v for k, v in profiles_data["profiles"][selected_device]
+            }
+        else:
+            # Произвольный файл (через "Обзор...")
+            profile_path = selected_device
+            if profile_path and not Path(profile_path).is_absolute():
+                profile_path = str(Path(__file__).parent / profile_path)
+
         try:
             res = build_normalized_preset_dynamic(
-                self.json_path.get(),
+                profile_path,
                 self.spectrum_files,
                 peak_limit,
                 min_db_threshold,
                 min_gain,
                 masking_margin,
                 filter_length_val,
+                speaker_response if profile_path is None else None,
             )
             (
                 self.calculated_points,
