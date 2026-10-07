@@ -253,6 +253,30 @@ class AdvancedMaskingStudio(tk.Tk):
         self.ax.set_ylim(min_y, max(max_y, 15))
         self.canvas.draw()
 
+    def _show_profile_selector(self, profiles: dict) -> str | None:
+        """Диалог выбора профиля из JSON с несколькими устройствами."""
+        win = tk.Toplevel(self)
+        win.title("Выберите устройство")
+        win.geometry("300x200")
+        win.transient(self)
+        win.grab_set()
+
+        ttk.Label(win, text="Доступные устройства:").pack(pady=(10, 5))
+        combo = ttk.Combobox(win, values=list(profiles.keys()), state="readonly", width=30)
+        combo.pack(pady=5)
+        if profiles:
+            combo.current(0)
+
+        result: list[str | None] = [None]
+
+        def on_ok():
+            result[0] = combo.get()
+            win.destroy()
+
+        ttk.Button(win, text="OK", command=on_ok).pack(pady=10)
+        win.wait_window()
+        return result[0]
+
     def _process_data(self, quiet=False):
         if not self.json_path.get() or not self.spectrum_files:
             return
@@ -268,26 +292,33 @@ class AdvancedMaskingStudio(tk.Tk):
             return
 
         selected_device = self.json_path.get()
-        # Защитная распаковка tuple-строк в чистые имена путей
         if isinstance(selected_device, (tuple, list)) and len(selected_device) > 0:
             selected_device = selected_device[0]
 
         profile_path = None
-        speaker_response = None
+        profile_name = None
 
         if selected_device in self.device_names:
-            with open(self.profiles_file, "r", encoding="utf-8") as f:
-                profiles_data = json.load(f)
-            speaker_response = {int(k): v for k, v in profiles_data["profiles"][selected_device]}
+            profile_path = str(self.profiles_file)
+            profile_name = selected_device
         else:
             profile_path = selected_device
             if profile_path and not Path(profile_path).is_absolute():
                 profile_path = str(Path(__file__).parent / profile_path)
 
+            with open(profile_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            keys = list(data.get("profiles", {}).keys())
+            if len(keys) == 1:
+                profile_name = keys[0]
+            elif len(keys) > 1:
+                profile_name = self._show_profile_selector(data["profiles"])
+
         try:
             res = build_normalized_preset_dynamic(
                 profile_path, self.spectrum_files, peak_limit, min_db_threshold,
-                min_gain, masking_margin, filter_length_val, h2_gain, h3_gain, speaker_response
+                min_gain, masking_margin, filter_length_val, h2_gain, h3_gain,
+                None, profile_name
             )
             (self.calculated_points, base_peaks, reduction, self.filter_length_val, peaks_details) = res
 
