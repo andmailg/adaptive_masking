@@ -1,0 +1,154 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}</style><style>:root{color-scheme:light dark;--md-bg:#fff;--md-text:rgba(0,0,0,.8);--md-muted:rgba(0,0,0,.6);--md-fill:rgba(0,0,0,.04);--md-fill-strong:rgba(0,0,0,.06);--md-rule:rgba(0,0,0,.1);--md-rule-strong:rgba(0,0,0,.16);--md-link:hsl(210 100% 45%)}@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){--md-bg:#0d0d0d;--md-text:rgba(255,255,255,.85);--md-muted:rgba(255,255,255,.6);--md-fill:rgba(255,255,255,.06);--md-fill-strong:rgba(255,255,255,.09);--md-rule:rgba(255,255,255,.14);--md-rule-strong:rgba(255,255,255,.22);--md-link:hsl(210 100% 72%)}}:root[data-theme="dark"]{color-scheme:dark;--md-bg:#0d0d0d;--md-text:rgba(255,255,255,.85);--md-muted:rgba(255,255,255,.6);--md-fill:rgba(255,255,255,.06);--md-fill-strong:rgba(255,255,255,.09);--md-rule:rgba(255,255,255,.14);--md-rule-strong:rgba(255,255,255,.22);--md-link:hsl(210 100% 72%)}:root[data-theme="light"]{color-scheme:light}@media print{:root,:root[data-theme="dark"]{color-scheme:light;--md-bg:#fff;--md-text:rgba(0,0,0,.8);--md-muted:rgba(0,0,0,.6);--md-fill:rgba(0,0,0,.04);--md-fill-strong:rgba(0,0,0,.06);--md-rule:rgba(0,0,0,.1);--md-rule-strong:rgba(0,0,0,.16);--md-link:hsl(210 100% 45%)}}body{background:var(--md-bg);color:var(--md-text);max-width:720px;margin:0 auto;padding:32px;display:flex;flex-direction:column;gap:10px;font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro','Segoe UI',sans-serif;overflow-wrap:break-word}body>:first-child{margin-top:0}h1,h2,h3,h4,h5,h6{margin:6px 0 0;line-height:1.25;font-weight:600;text-wrap:balance}h1{font-size:1.35em}h2{font-size:1.15em;color:var(--md-muted)}h3,h4,h5,h6{font-size:1em}p,ul,ol,blockquote,table,pre,hr{margin:0}strong{font-weight:600}a{color:var(--md-link);text-decoration:none}a:hover{text-decoration:underline}ul,ol{display:flex;flex-direction:column;gap:6px;padding-left:22px}ul{list-style:disc}ol{list-style:decimal}:is(li,td,th)>*+:is(p,ul,ol,blockquote){margin-top:6px}blockquote{display:flex;flex-direction:column;gap:10px;border-left:2px solid var(--md-rule);padding-left:10px;color:var(--md-muted)}:not(pre)>code{background:var(--md-fill);padding:1px 3px;border-radius:4px;font:.92em 'SF Mono',ui-monospace,Menlo,Consolas,monospace}a>code{background:none;color:inherit}pre{background:var(--md-fill);padding:10px 12px;border-radius:6px;overflow-x:auto;font:12px/1.5 'SF Mono',ui-monospace,Menlo,Consolas,monospace;margin-block:4px}pre code{background:none;padding:0;font:inherit}table{width:100%;border-collapse:separate;border-spacing:2px;font:inherit}th,td{padding:6px 8px;border-radius:3px;text-align:left;vertical-align:top}th{background:var(--md-fill-strong);font-weight:600}td{background:var(--md-fill)}:is(th,td) :not(pre)>code{background:transparent}hr{border:0;border-top:1px solid var(--md-rule-strong);margin-block:10px}img{max-width:100%;height:auto;border-radius:4px}</style>
+</head><body>
+<h1>Advanced Noise Masking Studio — инструкция по настройке</h1>
+<p>Программа строит кривую фильтра («купол»), которая превращает шум-маскер в сигнал, перекрывающий ваш шум на выбранном устройстве. Кривая экспортируется в Audacity (Filter Curve EQ).</p>
+<h2>1. Как это работает</h2>
+<ol>
+<li>Спектры вашего шума разбиваются на полосы слуха (ERB). По нескольким файлам берётся <strong>худший случай</strong> по каждой полосе.</li>
+<li>Из АЧХ устройства берутся границы воспроизведения и компенсация спада.</li>
+<li>Всё, что устройство воспроизвести может, маскируется кривой, повторяющей уровень шума.</li>
+<li>Пики <strong>ниже нижней границы устройства</strong> воспроизвести нельзя, поэтому для них строятся купола <strong>2-й и 3-й гармоник</strong> (пик 48 Гц → купола на 96 и 144 Гц).</li>
+<li>Учитывается спектр исходного шума-маскера (по умолчанию коричневый, как в генераторе программы).</li>
+<li>Вершина кривой всегда стоит ровно на уровне «Лимит купола».</li>
+</ol>
+<p><strong>Важное ограничение.</strong> Гармоники создают маскирование на своих частотах и «виртуальный бас», но не маскируют саму энергию на частотах ниже границы устройства. Если гул лежит ниже диапазона динамика, полностью закрыть его нельзя, поможет только устройство с более глубоким басом.</p>
+<h2>2. Подготовка данных</h2>
+<p><strong>Спектры шума (TXT).</strong> В Audacity: выделите запись шума → <em>Анализ → Построить спектр</em> → <em>Экспорт</em>. Файл имеет заголовок <code>Frequency (Hz)  Level (dB)</code>.</p>
+<ul>
+<li>Записывайте шум в разные дни и состояния: программа объединяет файлы.</li>
+<li>Все записи делайте с одинаковым уровнем записи и размером FFT (в ваших примерах шаг около 0.67 Гц).</li>
+<li>Запись должна быть достаточно длинной, чтобы спектр был усреднённым и гладким.</li>
+</ul>
+<p><strong>Профиль устройства (JSON).</strong> Список пар «частота — дБ»: <em>+ Устройство</em> добавляет профиль, <em>Обзор...</em> открывает другой файл. Точнее всего — собственный замер (REW или ARTA, свип-тон, экспорт «частота дБ») на той громкости, на которой вы будете слушать, так как у Emberton III включена функция Dynamic Loudness. Нижняя граница диапазона берётся из <strong>первой точки профиля</strong> (для Emberton III это 65 Гц).</p>
+<h2>3. Порядок настройки</h2>
+<ol>
+<li>Выберите профиль и спектры (кнопки <em>Выбрать...</em>).</li>
+<li>Нажмите <strong>Рассчитать и нормализовать АЧХ</strong> и откройте лог: проверьте, что список пиков совпадает с тем, что вы видите в Audacity.</li>
+<li>Настройте <strong>порог пиков</strong>, так чтобы в лог попали нужные пики и не попал шумовой пол.</li>
+<li>Проверьте <strong>нижнюю границу</strong> (по умолчанию стоит правильно).</li>
+<li>Подберите <strong>гармоники и склоны</strong> (таблица ниже), следя за графиком.</li>
+<li>Нажмите <em>Экспорт пресета .txt</em>, примените в Audacity и послушайте на рабочей громкости.</li>
+<li>Если гул слышен, корректируйте по разделу 5.</li>
+</ol>
+<h2>4. Параметры</h2>
+<table>
+<thead>
+<tr>
+<th>Параметр</th>
+<th>По умолчанию</th>
+<th>Что делает и как подбирать</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Нижний порог пиков</strong> (-100…-40 дБ)</td>
+<td>-70</td>
+<td>Бины ниже порога игнорируются. Ставьте чуть ниже самого слабого пика, который нужно маскировать. Слишком низко — в расчёт попадает пол записи, кривая «расползается» (при -90 появляются пики 79, 108, 219 Гц и выше). Слишком высоко — слабые пики и целые файлы выпадают (при -70 файл с максимумом -73.5 дБ не участвует). Для записей с пиками -57…-74 дБ разумно -75…-60.</td>
+</tr>
+<tr>
+<td><strong>Нижний пол купола</strong></td>
+<td>-24 дБ</td>
+<td>Усиление вне куполов. Ниже — контрастнее и только нужные зоны, выше — шире «подложка».</td>
+</tr>
+<tr>
+<td><strong>Размер окна фильтра</strong></td>
+<td>8191</td>
+<td>Длиннее окно — точнее на низах, но больше задержка и «звон». Для узких пиков на 40–70 Гц оставьте 8191 и не уменьшайте.</td>
+</tr>
+<tr>
+<td><strong>Лимит купола</strong></td>
+<td>0 дБ</td>
+<td>Уровень вершины. Держите ≤ 0, чтобы не было перегрузки. Громкостью маскера управляйте громкостью воспроизведения, а не этим параметром.</td>
+</tr>
+<tr>
+<td><strong>Усиление 2-й / 3-й гармоники</strong> (0–15 дБ)</td>
+<td>7 / 4.5</td>
+<td>Высота куполов гармоник относительно уровня шума пика. Больше — купола заметнее выступают над остальной кривой. Начните со значений по умолчанию, меняйте по 2–3 дБ.</td>
+</tr>
+<tr>
+<td><strong>Крутизна нижнего / верхнего склона</strong></td>
+<td>8 / 3</td>
+<td>Чем больше число, тем уже и круче склон. Нижний склон круче, верхний пологий: маскирование распространяется вверх шире. Если купола 2f и 3f слились в один горб — увеличьте крутизну; если между ними слишком глубокий провал — уменьшите.</td>
+</tr>
+<tr>
+<td><strong>Нижняя граница</strong> (Гц)</td>
+<td>первая точка профиля</td>
+<td>Ниже неё устройство «не работает». Если на высокой громкости слышны хрипы или дребезг, поднимите на 5–15 Гц: подъём на краю станет меньше.</td>
+</tr>
+<tr>
+<td><strong>Порог инфра-пиков</strong> (дБ)</td>
+<td>-8</td>
+<td>Влияет на пики в узкой зоне между границей диапазона и этим порогом: они тоже получают 3-ю гармонику. На пики ниже границы не действует.</td>
+</tr>
+<tr>
+<td><strong>Исходный шум</strong></td>
+<td>коричневый</td>
+<td>Должен совпадать с шумом, к которому вы применяете пресет (Brownian — коричневый, White — белый).</td>
+</tr>
+<tr>
+<td><strong>Объединение файлов</strong></td>
+<td>по худшему случаю</td>
+<td><em>max</em> — если гул «гуляет» по дням, как 48 и 64–65 Гц (рекомендуется). <em>mean</em> — для стабильного шума.</td>
+</tr>
+<tr>
+<td><strong>Сбросить по умолчанию</strong></td>
+<td>—</td>
+<td>Возвращает все параметры; профиль и файлы остаются.</td>
+</tr>
+</tbody>
+</table>
+<h2>5. Если гул слышен</h2>
+<p>Двигайтесь по порядку:</p>
+<ol>
+<li><strong>Громкость маскера.</strong> Это главный и единственный честный регулятор запаса над шумом.</li>
+<li><strong>Гармоники +2–3 дБ</strong>, затем проверьте форму куполов склонами.</li>
+<li><strong>Порог пиков.</strong> Возможно, значимые пики не попали в расчёт.</li>
+<li><strong>Нижняя граница</strong> — опускайте только если устройство действительно тянет эти частоты.</li>
+<li>Если пики лежат сильно ниже диапазона динамика, нужно устройство с более глубоким басом.</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Симптом</th>
+<th>Вероятная причина</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>На графике почти ничего нет, всё на полу</td>
+<td>Порог слишком высокий или нет пиков выше порога</td>
+</tr>
+<tr>
+<td>Очень много пиков, кривая как широкий блок</td>
+<td>Порог слишком низкий</td>
+</tr>
+<tr>
+<td>Хрип или дребезг маскера</td>
+<td>Слишком низкая граница или слишком большая громкость</td>
+</tr>
+<tr>
+<td>Купола сливаются</td>
+<td>Мала крутизна склонов</td>
+</tr>
+<tr>
+<td>Нужный пик исчез</td>
+<td>Пик ниже порога или файл с ним не выбран</td>
+</tr>
+</tbody>
+</table>
+<h2>6. Применение результата</h2>
+<ol>
+<li><em>Экспорт пресета .txt</em> — файл Audacity Filter Curve.</li>
+<li>В Audacity создайте шум (<em>Сгенерировать → Шум</em>, тип Brownian — как в программе) или используйте mp3 из программы.</li>
+<li><em>Эффекты → Filter Curve EQ… → Manage → Import...</em> и выберите пресет (название пунктов зависит от версии).</li>
+<li>Примените эффект, экспортируйте результат.</li>
+</ol>
+<p><strong>Внимание:</strong> кнопка <em>Сгенерировать шум .mp3</em> создаёт 10 минут коричневого шума с общим усилением, но <strong>кривую в него не применяет</strong>. Чтобы маскер соответствовал вашему шуму, прогоните шум через пресет в Audacity.</p>
+<h2>7. Что программа не гарантирует</h2>
+<ul>
+<li>Параметры маскирования (ширина полос, склоны) — приближённая модель из литературы, окончательную настройку делайте на слух.</li>
+<li>Если профиль устройства не замерен, нижняя граница и компенсация приблизительны.</li>
+<li>АЧХ Emberton III зависит от громкости (Dynamic Loudness), поэтому профиль и маскер лучше проверять на рабочей громкости.</li>
+</ul>
+
+</body></html>

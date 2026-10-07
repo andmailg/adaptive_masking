@@ -1,48 +1,21 @@
+"""Психоакустический купол: маскировка конкретного шума на конкретном устройстве.
+
+Алгоритм:
+  1. Спектры шума -> уровни в полосах ERB (огибающая «худшего случая» по всем файлам).
+  2. АЧХ устройства -> рабочий диапазон и компенсация.
+  3. Воспроизводимая часть шума маскируется кривой, повторяющей уровень шума в полосе ERB.
+  4. Для невоспроизводимых пиков строятся купола 2-й и 3-й гармоник (виртуальный бас):
+     уровень купола = уровень шума в полосе пика + усиление гармоники, склоны
+     несимметричные (функция распространения маскирования), ширина — по шкале ERB.
+  5. Учитывается спектр исходного маскирующего сигнала (по умолчанию коричневый шум
+     с полюсом 0.995, как в генераторе интерфейса).
+"""
 import bisect
 import json
 import math
 from pathlib import Path
 
-def get_all_spectrum_peaks_dynamic(
-    file_paths: list[str], min_db_threshold: float
-) -> tuple[set[int], list[dict]]:
-    """Динамически ищет доминирующие пики по всему спектру частот."""
-    detected_frequencies = set()
-    all_found_peaks_details = []
-
-    for file_path in file_paths:
-        path = Path(file_path)
-        if not path.exists():
-            continue
-
-        file_peaks = []
-        with open(path, "r", encoding="utf-8") as file:
-            next(file, None)  # Пропускаем заголовок Audacity
-            for line in file:
-                if not line.strip():
-                    continue
-                try:
-                    freq_str, level_str = line.split()
-                    freq = float(freq_str)
-                    level = float(level_str)
-
-                    if level >= min_db_threshold:
-                        file_peaks.append({
-                            "freq": int(round(freq)),
-                            "level": round(level, 1),
-                            "source": path.name,
-                        })
-                except ValueError:
-                    continue
-
-        file_peaks.sort(key=lambda x: x["level"], reverse=True)
-        for peak in file_peaks:
-            detected_frequencies.add(peak["freq"])
-            all_found_peaks_details.append(peak)
-
-    all_found_peaks_details.sort(key=lambda x: x["level"], reverse=True)
-    return detected_frequencies, all_found_peaks_details
-
+import numpy as np
 
 FREQ_MIN_HZ = 20
 FREQ_MAX_HZ = 20000
@@ -136,6 +109,14 @@ class SpeakerResponse:
         """Уровень относительно опорного (0 дБ = максимум АЧХ)."""
         return self.at(freq) - self.reference
 
+    def measured_band(self, f_lo: int, f_hi: int) -> tuple[int, int]:
+        """Границы диапазона = первая и последняя измеренные точки АЧХ (как заданы в профиле)."""
+        if self.empty:
+            return f_lo, f_hi
+        lo = max(f_lo, int(math.ceil(self.freqs[0])))
+        hi = min(f_hi, int(math.floor(self.freqs[-1])))
+        return (lo, hi) if lo < hi else (f_lo, f_hi)
+
     def usable_band(self, cutoff_db: float, f_lo: int, f_hi: int) -> tuple[int, int]:
         """Границы рабочего диапазона: где АЧХ не ниже опорного уровня + cutoff_db."""
         if self.empty:
@@ -152,173 +133,319 @@ def interpolate_speaker_response(speaker_data: dict, target_freq: float) -> floa
     return SpeakerResponse(speaker_data).at(target_freq)
 
 
+
+# --------------------------------------------------------------------------------------
+# Психоакустика
+# --------------------------------------------------------------------------------------
+ERB_TO_BARK_SCALE = 0.63      # перевод шкалы ERB-rate в «барк-подобные» единицы для SF
+PEAK_PROMINENCE_DB = 4.0      # минимальная выделенность пика над окружением
+PEAK_BAND_OCT = 1.0 / 6.0     # полоса сглаживания при поиске пиков
+GRID_ERB_STEP = 0.1           # шаг сетки по шкале ERB-number
+DOME_SLOPE_DOWN = 8.0         # крутизна нижнего склона купола относительно SF (больше — круче)
+DOME_SLOPE_UP = 3.0           # крутизна верхнего склона: маскирование вверх распространяется шире
+LOW_EDGE_TAPER_OCT = 0.3      # плавный спад ниже нижней границы устройства
+
+
+def _erb_number(f):
+    return 21.4 * np.log10(1.0 + 0.00437 * np.asarray(f, dtype=float))
+
+
+def _erb_number_inv(e):
+    return (10.0 ** (np.asarray(e, dtype=float) / 21.4) - 1.0) / 0.00437
+
+
+def _erb_bandwidth(f):
+    return 24.7 * (4.37 * np.asarray(f, dtype=float) / 1000.0 + 1.0)
+
+
+def _critical_rate(f):
+    return _erb_number(f) * ERB_TO_BARK_SCALE
+
+
+def _spreading_db(dz):
+    """Функция распространения маскирования (Schroeder), дБ.
+    dz = z(маскируемого) - z(маскера): dz > 0 — маскируемый выше маскера (спад пологий),
+    dz < 0 — ниже (спад крутой). SF(0) = 0 дБ."""
+    u = np.asarray(dz, dtype=float) + 0.474
+    return 15.81 + 7.5 * u - 17.5 * np.sqrt(1.0 + u * u)
+
+
+def source_spectrum_db(freqs, pole: float | None = 0.995, sample_rate: float = 44100.0):
+    """Спектр исходного маскирующего сигнала (дБ, относительный).
+    pole=0.995 — коричневый шум генератора (y = 0.995*y + x); None — плоский (белый)."""
+    freqs = np.asarray(freqs, dtype=float)
+    if pole is None:
+        return np.zeros_like(freqs)
+    w = 2.0 * np.pi * freqs / sample_rate
+    mag = np.abs(1.0 - pole * np.exp(-1j * w))
+    return -20.0 * np.log10(mag)
+
+
+# --------------------------------------------------------------------------------------
+# Анализ шума
+# --------------------------------------------------------------------------------------
+def _load_noise_file(path: Path):
+    freqs, levels = [], []
+    with open(path, "r", encoding="utf-8") as fh:
+        next(fh, None)  # заголовок Audacity
+        for line in fh:
+            parts = line.replace(",", " ").split()
+            if len(parts) < 2:
+                continue
+            try:
+                f, lv = float(parts[0]), float(parts[1])
+            except ValueError:
+                continue
+            if f > 0 and math.isfinite(lv):
+                freqs.append(f)
+                levels.append(lv)
+    return np.array(freqs), np.array(levels)
+
+
+def _band_levels_db(freqs, levels_db, centers, widths):
+    """Суммарный уровень (дБ) в полосах [c - w/2, c + w/2]."""
+    if len(freqs) < 2:
+        return np.full(len(centers), -200.0)
+    power = 10.0 ** (levels_db / 10.0)
+    cum = np.concatenate(([0.0], np.cumsum(power)))
+    edges_x = np.concatenate(([freqs[0] - (freqs[1] - freqs[0]) / 2.0],
+                              (freqs[:-1] + freqs[1:]) / 2.0,
+                              [freqs[-1] + (freqs[-1] - freqs[-2]) / 2.0]))
+    lo = np.interp(centers - widths / 2.0, edges_x, cum)
+    hi = np.interp(centers + widths / 2.0, edges_x, cum)
+    total = np.maximum(hi - lo, 1e-30)
+    return 10.0 * np.log10(total)
+
+
+def _find_peaks(values, prominence):
+    """Индексы локальных максимумов с заданной выделенностью (дБ)."""
+    n = len(values)
+    peaks = []
+    for i in range(1, n - 1):
+        v = values[i]
+        if v < values[i - 1] or v <= values[i + 1]:
+            continue
+        left_base, j = v, i - 1
+        while j >= 0 and values[j] <= v:
+            left_base = min(left_base, values[j])
+            j -= 1
+        right_base, j = v, i + 1
+        while j < n and values[j] <= v:
+            right_base = min(right_base, values[j])
+            j += 1
+        if v - max(left_base, right_base) >= prominence:
+            peaks.append(i)
+    return peaks
+
+
+def _window_max_db(freqs, levels_db, centers, widths):
+    """Максимальный по бинам уровень (дБ) внутри полос [c - w/2, c + w/2]."""
+    lo = np.searchsorted(freqs, centers - widths / 2.0, side="left")
+    hi = np.searchsorted(freqs, centers + widths / 2.0, side="right")
+    out = np.full(len(centers), -200.0)
+    for i, (a, b) in enumerate(zip(lo, hi)):
+        if b > a:
+            out[i] = levels_db[a:b].max()
+    return out
+
+
+def analyze_noise(file_paths, min_db_threshold, grid_freqs, freq_min, freq_max, combine="max"):
+    """Анализ спектров шума.
+
+    Возвращает (band_db, peak_db, base_peaks, peaks_details):
+      band_db  — суммарный уровень шума в полосе ERB на сетке (дБ), «худший случай» по файлам;
+      peak_db  — максимальный бинный уровень в той же полосе (для сравнения с порогом);
+      base_peaks — отсортированные частоты пиков (целые Гц); peaks_details — freq/level/source.
+    """
+    grid_freqs = np.asarray(grid_freqs, dtype=float)
+    widths = _erb_bandwidth(grid_freqs)
+
+    octaves = math.log2(freq_max / freq_min)
+    fine_n = max(8, int(24 * octaves))
+    fine_centers = freq_min * 2.0 ** (np.arange(fine_n + 1) * (octaves / fine_n))
+    fine_widths = fine_centers * (2.0 ** (PEAK_BAND_OCT / 2.0) - 2.0 ** (-PEAK_BAND_OCT / 2.0))
+
+    bands, peakmax, fine_sum, fine_peak, files = [], [], [], [], []
+    peaks_details = []
+    for file_path in file_paths:
+        path = Path(file_path)
+        if not path.exists():
+            continue
+        freqs, levels = _load_noise_file(path)
+        if len(freqs) < 2:
+            continue
+        order = np.argsort(freqs)
+        freqs, levels = freqs[order], levels[order]
+
+        bands.append(_band_levels_db(freqs, levels, grid_freqs, widths))
+        peakmax.append(_window_max_db(freqs, levels, grid_freqs, widths))
+        fs = _band_levels_db(freqs, levels, fine_centers, fine_widths)
+        fp = _window_max_db(freqs, levels, fine_centers, fine_widths)
+        fine_sum.append(fs)
+        fine_peak.append(fp)
+        files.append((path.name, freqs, levels))
+
+        for idx in _find_peaks(fs, PEAK_PROMINENCE_DB):
+            if fp[idx] < min_db_threshold:
+                continue
+            lo, hi = fine_centers[idx] - fine_widths[idx] / 2, fine_centers[idx] + fine_widths[idx] / 2
+            m = (freqs >= lo) & (freqs <= hi)
+            k = int(np.argmax(levels[m]))
+            peaks_details.append({
+                "freq": int(round(freqs[m][k])),
+                "level": round(float(levels[m][k]), 1),
+                "source": path.name,
+            })
+
+    if not bands:
+        return None, None, [], []
+
+    stack = np.vstack(bands)
+    if combine == "mean":
+        band_db = 10.0 * np.log10(np.mean(10.0 ** (stack / 10.0), axis=0))
+    else:
+        band_db = stack.max(axis=0)
+    peak_db = np.vstack(peakmax).max(axis=0)
+
+    # Пики для гармоник — по огибающей «худшего случая»
+    fine_env = np.vstack(fine_sum).max(axis=0)
+    fine_peak_env = np.vstack(fine_peak).max(axis=0)
+    base_peaks = set()
+    for idx in _find_peaks(fine_env, PEAK_PROMINENCE_DB):
+        if fine_peak_env[idx] < min_db_threshold:
+            continue
+        lo, hi = fine_centers[idx] - fine_widths[idx] / 2, fine_centers[idx] + fine_widths[idx] / 2
+        best_f, best_l = None, -1e9
+        for _, freqs, levels in files:
+            m = (freqs >= lo) & (freqs <= hi)
+            if m.any():
+                k = int(np.argmax(levels[m]))
+                if levels[m][k] > best_l:
+                    best_l, best_f = levels[m][k], freqs[m][k]
+        if best_f is not None:
+            base_peaks.add(int(round(best_f)))
+
+    peaks_details.sort(key=lambda p: p["level"], reverse=True)
+    return band_db, peak_db, sorted(base_peaks), peaks_details
+
+
+def get_all_spectrum_peaks_dynamic(file_paths, min_db_threshold):
+    """Совместимость: (множество частот пиков, подробности пиков)."""
+    grid = _erb_number_inv(np.arange(_erb_number(FREQ_MIN_HZ), _erb_number(FREQ_MAX_HZ), GRID_ERB_STEP))
+    _, _, peaks, details = analyze_noise(file_paths, min_db_threshold, grid, FREQ_MIN_HZ, FREQ_MAX_HZ)
+    return set(peaks), details
+
+
+# --------------------------------------------------------------------------------------
+# Решение задачи маскировки
+# --------------------------------------------------------------------------------------
 def build_normalized_preset_dynamic(
     profile_path: str | None,
     spectrum_paths: list[str],
     max_peak_limit: float,
     min_db_threshold: float,
     min_gain: float,
-    masking_margin: float,
     filter_length: int,
     h2_gain: float,
     h3_gain: float,
     speaker_response=None,
     profile_name: str | None = None,
-    cutoff_db: float = -12.0,
+    freq_low: float | None = None,
     infra_db: float = -8.0,
-    fundamental_gain: float = 6.0,
     freq_min: int = FREQ_MIN_HZ,
     freq_max: int = FREQ_MAX_HZ,
+    source_pole: float | None = 0.995,
+    noise_combine: str = "max",
+    dome_slope_down: float = DOME_SLOPE_DOWN,
+    dome_slope_up: float = DOME_SLOPE_UP,
 ):
-    """Строит психоакустический купол с вершиной точно в max_peak_limit.
+    """Строит маскирующую кривую фильтра под заданный шум и устройство.
 
-    АЧХ устройства — любая: speaker_response (dict / пары / путь к файлу) либо
-    profile_path (+ profile_name). Пороги относительные (от максимума АЧХ):
-      cutoff_db  — ниже этого уровня устройство считается не воспроизводящим (границы диапазона);
-      infra_db   — пики, лежащие ниже этого уровня, воспроизводятся через гармоники.
+    Параметры АЧХ: speaker_response (dict / пары / путь) либо profile_path (+profile_name).
+    min_db_threshold — шум в полосе ниже этого уровня маскировать не нужно.
+    h2_gain, h3_gain — высота куполов 2-й и 3-й гармоник (дБ); масштабируется уровнем шума пика.
+    freq_low — нижняя граница воспроизведения, Гц (по умолчанию — первая точка АЧХ из профиля);
+    infra_db — относительный (от максимума АЧХ) порог «инфра» пиков.
+    source_pole — полюс исходного шума (0.995 — коричневый, None — белый).
+    noise_combine — объединение файлов: "max" (худший случай) или "mean".
+    dome_slope_down / dome_slope_up — крутизна нижнего / верхнего склона куполов гармоник.
     """
-    base_peaks, peaks_details = get_all_spectrum_peaks_dynamic(
-        spectrum_paths, min_db_threshold
-    )
-
     response = SpeakerResponse(
         load_speaker_response(
             speaker_response if speaker_response is not None else profile_path,
             profile_name,
         )
     )
+    # Рабочий диапазон берётся из самого профиля (первая/последняя точка АЧХ);
+    # нижнюю границу можно переопределить через freq_low
+    f_min, f_max = response.measured_band(freq_min, freq_max)
+    if freq_low is not None:
+        f_min = min(max(freq_min, int(round(freq_low))), f_max - 1)
 
-    # Рабочий диапазон устройства определяется по его АЧХ, а не зашит в код
-    f_min, f_max = response.usable_band(cutoff_db, freq_min, freq_max)
+    # Сетка по шкале ERB
+    grid = _erb_number_inv(np.arange(_erb_number(freq_min), _erb_number(freq_max) + 1e-9, GRID_ERB_STEP))
+    z = _critical_rate(grid)
 
-    dense_frequencies = set()
-    if base_peaks:
-        min_peak = min(base_peaks)
-        max_peak = max(base_peaks)
-        start_dome = max(freq_min, min_peak - 10)
-        end_dome = min(freq_max, (max_peak * 3) + 30)
-        for freq in range(start_dome, end_dome + 1, 1):
-            dense_frequencies.add(freq)
-    else:
-        for freq in range(f_min, min(f_max, f_min + 200) + 1, 1):
-            dense_frequencies.add(freq)
+    band_db, peak_db, base_peaks, peaks_details = analyze_noise(
+        spectrum_paths, min_db_threshold, grid, freq_min, freq_max, noise_combine
+    )
 
-    # Предрасчёт по пикам: не пересчитываем АЧХ в цикле по частотам
-    peak_infra = {p: response.relative(p) < infra_db for p in base_peaks}
+    reproducible = (grid >= f_min) & (grid <= f_max)
+    device_rel = np.array([response.relative(f) for f in grid])
+    source_db = source_spectrum_db(grid, source_pole)
 
-    def octave_dist(f_center, f_target):
-        if f_center <= 0 or f_target <= 0:
-            return float("inf")
-        return abs(math.log2(f_target / f_center))
+    # Целевой уровень маскера (дБ) на сетке; -inf — маскер не нужен
+    target = np.full(len(grid), -np.inf)
 
-    # Ширина купола: ~0.5 октавы в каждую сторону от центра
-    half_width = 0.5
+    if band_db is not None:
+        # 1) Воспроизводимая часть шума: маскер повторяет уровень шума в полосе ERB
+        significant = (peak_db >= min_db_threshold) & reproducible
+        target = np.where(significant, band_db, target)
 
-    def bump(od, gain):
-        return max(0.0, gain * (1.0 + math.cos(min(od, half_width) / half_width * math.pi)) / 2.0)
-
-    raw_points = {}
-    base_zone_gains = []
-
-    # ШАГ 1: Расчёт идеальной, несжатой психоакустической формы
-    for freq in sorted(dense_frequencies):
-        if freq < f_min or freq > f_max:
-            raw_points[freq] = min_gain
-            continue
-
-        speaker_efficiency = response.at(freq)
-        center_bonus = 0.0
-        is_pure_base = False
-
+        # 2) Невоспроизводимые пики — купола 2-й и 3-й гармоник; воспроизводимые — 2-й.
+        #    Уровень купола = уровень шума в полосе пика + усиление гармоники, поэтому
+        #    высота зависит от того, насколько пик силён; ширина и склоны — по ERB и SF.
         for p in base_peaks:
-            od_f1 = octave_dist(p, freq)
-            od_f2 = octave_dist(p * 2, freq)
-            od_f3 = octave_dist(p * 3, freq)
+            level = float(np.interp(p, grid, band_db))
+            infra = response.relative(p) < infra_db or p < f_min
+            harmonics = ((2, h2_gain), (3, h3_gain)) if infra else ((2, h2_gain),)
+            for order, amp in harmonics:
+                fc = p * order
+                if fc > f_max:
+                    continue
+                dz = z - _critical_rate(fc)
+                slope = np.where(dz > 0, dome_slope_up, dome_slope_down)
+                dome = level + amp + slope * _spreading_db(dz)
+                target = np.where(reproducible, np.maximum(target, dome), target)
+    else:
+        target = np.where(reproducible, 0.0, -np.inf)
 
-            if not peak_infra[p]:
-                b1 = bump(od_f1, fundamental_gain)
-                if b1 > 0:
-                    is_pure_base = True
-                b2 = bump(od_f2, h2_gain)
-                center_bonus = max(center_bonus, b1 + b2)
-            else:
-                b2 = bump(od_f2, h2_gain)
-                b3 = bump(od_f3, h3_gain)
-                center_bonus = max(center_bonus, b2 + b3)
+    # Усиление фильтра: нужный выход маскера минус исходный сигнал минус АЧХ устройства
+    gain = target - source_db - device_rel
+    gain = np.where(reproducible & np.isfinite(gain), gain, -1e9)
 
-        calculated_gain = (0.0 - speaker_efficiency) + masking_margin + center_bonus
-        raw_points[freq] = calculated_gain
-        if is_pure_base or (not base_peaks and f_min <= freq <= f_min + 30):
-            base_zone_gains.append(calculated_gain)
-
-    # ШАГ 2: Расчёт величины глобального сдвига для идеальной посадки пика
-    # Находим абсолютный максимум исходной формы купола
-    unlimited_max = max(base_zone_gains) if base_zone_gains else max(raw_points.values()) if raw_points else 0.0
-    
-    # Величина коррекции: сдвигаем всю форму целиком, сохраняя её геометрию
+    # Нормализация: вершина ровно в max_peak_limit
+    unlimited_max = float(gain[reproducible].max()) if reproducible.any() and (gain[reproducible] > -1e8).any() else 0.0
     global_shift = unlimited_max - max_peak_limit
 
-    # ШАГ 3: Формирование финального массива точек
-    preset_points = []
-    active_gains = {}
-    for freq, raw_gain in raw_points.items():
-        if freq < f_min or freq > f_max:
-            final_gain = min_gain
-        else:
-            final_gain = raw_gain - global_shift
-            final_gain = max(min_gain, final_gain)  # Ограничение снизу (пол купола)
-            
-        preset_points.append((freq, round(final_gain, 1)))
-        if final_gain > min_gain:
-            active_gains[freq] = final_gain
+    final = np.where(gain > -1e8, gain - global_shift, min_gain)
+    final = np.maximum(final, min_gain)
 
-    first_active_freq = min(active_gains.keys()) if active_gains else f_min
-    first_active_gain = active_gains[first_active_freq] if active_gains else min_gain
-    last_active_freq = max(active_gains.keys()) if active_gains else 250
-    last_active_gain = active_gains[last_active_freq] if active_gains else min_gain
+    # Мягкий спад под нижней границей устройства вместо вертикального обрыва
+    below = (~reproducible) & (grid < f_min) & (grid >= f_min * 2.0 ** (-LOW_EDGE_TAPER_OCT))
+    if below.any() and reproducible.any():
+        edge_gain = float(final[reproducible][0])
+        t = np.log2(f_min / grid[below]) / LOW_EDGE_TAPER_OCT  # 0 у границы -> 1 внизу
+        smooth = 0.5 * (1.0 + np.cos(np.pi * np.clip(t, 0.0, 1.0)))
+        final[below] = np.maximum(final[below], min_gain + (edge_gain - min_gain) * smooth)
 
-    # Убираем «полочные» точки пола за пределами активной зоны: иначе они
-    # перемешиваются со сглаживающими рампами и дают гребёнку провалов
-    preset_points = [
-        (f, g) for f, g in preset_points
-        if first_active_freq <= f <= last_active_freq
-    ]
+    points = {}
+    for f, g in zip(grid, final):
+        fi = int(round(f))
+        if freq_min <= fi <= freq_max:
+            points[fi] = max(points.get(fi, min_gain), round(float(g), 1))
+    points[freq_min] = points.get(freq_min, min_gain)
+    points[freq_max] = points.get(freq_max, min_gain)
 
-    # Сглаживание спадов к краям спектра
-    preset_points.append((freq_min, min_gain))
-    if first_active_freq > freq_min and first_active_gain > min_gain:
-        log_start_l = math.log10(freq_min)
-        log_end_l = math.log10(first_active_freq)
-        steps_l = 30
-        for i in range(1, steps_l):
-            ratio = i / steps_l
-            log_f = log_start_l + ratio * (log_end_l - log_start_l)
-            f = int(round(10**log_f))
-            if freq_min < f < first_active_freq:
-                smooth_factor = (1.0 - math.cos(ratio * math.pi)) / 2.0
-                f_gain = min_gain + smooth_factor * (first_active_gain - min_gain)
-                preset_points.append((f, round(f_gain, 1)))
-
-    start_r_freq = last_active_freq + 1
-    if start_r_freq < freq_max and last_active_gain > min_gain:
-        log_start_r = math.log10(start_r_freq)
-        log_end_r = math.log10(freq_max)
-        steps_r = 100
-        for i in range(0, steps_r + 1):
-            ratio = i / steps_r
-            log_f = log_start_r + ratio * (log_end_r - log_start_r)
-            f = int(round(10**log_f))
-            if f > last_active_freq and f <= freq_max:
-                smooth_factor = (1.0 - math.cos(ratio * math.pi)) / 2.0
-                f_gain = last_active_gain - smooth_factor * (last_active_gain - min_gain)
-                preset_points.append((f, round(f_gain, 1)))
-    else:
-        preset_points.append((freq_max, min_gain))
-
-    unique_points = {}
-    for freq, gain in preset_points:
-        if freq not in unique_points or gain > unique_points[freq]:
-            unique_points[freq] = gain
-
-    preset_points = sorted(list(unique_points.items()), key=lambda x: x[0])
-    return preset_points, sorted(list(base_peaks)), global_shift, filter_length, peaks_details
+    preset_points = sorted(points.items(), key=lambda x: x[0])
+    return preset_points, list(base_peaks), global_shift, filter_length, peaks_details
