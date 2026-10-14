@@ -31,7 +31,11 @@ class AdvancedMaskingStudio(tk.Tk):
     DEFAULTS = {
         "max_peak_limit": "0.0",
         "min_db_threshold": -70.0,
+<<<<<<< HEAD
         "min_gain": "-60.0",
+=======
+        "min_gain": "-24.0",
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
         "filter_length": "8191",
         "h2_gain": 7.0,
         "h3_gain": 4.5,
@@ -43,16 +47,24 @@ class AdvancedMaskingStudio(tk.Tk):
         "auto_harmonics": True,
         "auto_slopes": True,
         "max_comp": 30.0,
+<<<<<<< HEAD
         "auto_low": True,
         "auto_comp": True,
+=======
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
         "auto_tol": 0.0,
     }
 
     def __init__(self):
         super().__init__()
         self.title("Advanced Noise Masking Studio (Monolithic Fixed)")
+<<<<<<< HEAD
         self.geometry("1020x980")
         self.minsize(980, 860)
+=======
+        self.geometry("1020x900")
+        self.minsize(980, 800)
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
 
         self.json_path = tk.StringVar()
         self.spectrum_files = []
@@ -81,8 +93,11 @@ class AdvancedMaskingStudio(tk.Tk):
         self.auto_tol_var = tk.DoubleVar(value=d["auto_tol"])
         self.auto_slopes_var = tk.BooleanVar(value=d["auto_slopes"])
         self.max_comp_var = tk.DoubleVar(value=d["max_comp"])
+<<<<<<< HEAD
         self.auto_low_var = tk.BooleanVar(value=d["auto_low"])
         self.auto_comp_var = tk.BooleanVar(value=d["auto_comp"])
+=======
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
         self.source_type_var = tk.StringVar(value=self.SOURCE_TYPES[0])
         self.combine_var = tk.StringVar(value=self.COMBINE_MODES[0])
         self.normalize_var = tk.StringVar(value=self.NORMALIZE_MODES[0])
@@ -148,8 +163,11 @@ class AdvancedMaskingStudio(tk.Tk):
             self.auto_tol_var.set(d["auto_tol"])
             self.auto_slopes_var.set(d["auto_slopes"])
             self.max_comp_var.set(d["max_comp"])
+<<<<<<< HEAD
             self.auto_low_var.set(d["auto_low"])
             self.auto_comp_var.set(d["auto_comp"])
+=======
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
             self.source_type_var.set(self.SOURCE_TYPES[0])
             self.combine_var.set(self.COMBINE_MODES[0])
             self.normalize_var.set(self.NORMALIZE_MODES[0])
@@ -171,8 +189,11 @@ class AdvancedMaskingStudio(tk.Tk):
         for slider in (self.h2_slider, self.h3_slider):
             slider.state(["disabled"] if auto_h else ["!disabled"])
         self.tol_slider.state(["!disabled"] if auto_h else ["disabled"])
+<<<<<<< HEAD
         self.low_limit_slider.state(["disabled"] if self.auto_low_var.get() else ["!disabled"])
         self.max_comp_slider.state(["disabled"] if self.auto_comp_var.get() else ["!disabled"])
+=======
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
         auto_s = self.auto_slopes_var.get()
         for slider in (self.slope_down_slider, self.slope_up_slider):
             slider.state(["disabled"] if auto_s else ["!disabled"])
@@ -191,6 +212,7 @@ class AdvancedMaskingStudio(tk.Tk):
         left_panel = ttk.Frame(self, padding=10)
         left_panel.pack(side="left", fill="both", expand=True)
 
+<<<<<<< HEAD
         # ---- 1. Устройство воспроизведения ----
         device_frame = ttk.LabelFrame(left_panel, text=" 1. Устройство воспроизведения ", padding=10)
         device_frame.pack(fill="x", pady=4)
@@ -280,6 +302,50 @@ class AdvancedMaskingStudio(tk.Tk):
         # ---- 4. Калибровка суб-баса ----
         harm_frame = ttk.LabelFrame(left_panel, text=" 4. Калибровка суб-баса (гармоники) ", padding=10)
         harm_frame.pack(fill="x", pady=4)
+=======
+        file_frame = ttk.LabelFrame(left_panel, text=" Исходные конфигурации ", padding=10)
+        file_frame.pack(fill="x", pady=4)
+
+        ttk.Label(file_frame, text="Профиль (JSON):").grid(row=0, column=0, sticky="w", pady=4)
+        self.profile_combo = ttk.Combobox(
+            file_frame, textvariable=self.json_path, values=self.device_names, width=20, state="readonly"
+        )
+        self.profile_combo.grid(row=0, column=1, padx=5, pady=4, sticky="w")
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_device_select)
+        ttk.Button(file_frame, text="Обзор...", command=self._browse_json).grid(row=0, column=2, padx=2, pady=4)
+        ttk.Button(file_frame, text="+ Устройство", command=self._add_device).grid(row=0, column=3, padx=2, pady=4)
+
+        ttk.Label(file_frame, text="Спектры (TXT):").grid(row=1, column=0, sticky="w", pady=4)
+        self.files_label = ttk.Label(file_frame, text="Файлы не выбраны", foreground="gray", width=24, anchor="w")
+        self.files_label.grid(row=1, column=1, padx=5, pady=4, sticky="w")
+        ttk.Button(file_frame, text="Выбрать...", command=self._browse_spectra).grid(row=1, column=2, padx=2, pady=4)
+
+        self.thr_slider, self.thr_lbl = self._add_slider(
+            file_frame, 2, "Нижний порог пиков (дБ):", self.min_db_threshold_var, -100.0, -40.0
+        )
+        ttk.Checkbutton(
+            file_frame, text="Авто", variable=self.auto_threshold_var, command=self._on_auto_toggle
+        ).grid(row=2, column=3, padx=2, pady=4, sticky="w")
+        self.range_slider, self.range_lbl = self._add_slider(
+            file_frame, 4, "Диапазон авто-порога (дБ):", self.auto_range_var, 10.0, 40.0
+        )
+
+        ttk.Label(file_frame, text="Нижний пол купола (дБ):").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Entry(file_frame, textvariable=self.min_gain_var, width=12).grid(row=3, column=1, padx=5, pady=4, sticky="w")
+
+        ttk.Label(file_frame, text="Размер окна фильтра:").grid(row=5, column=0, sticky="w", pady=4)
+        self.filter_entry = ttk.Entry(file_frame, textvariable=self.filter_length_var, width=12)
+        self.filter_entry.grid(row=5, column=1, padx=5, pady=4, sticky="w")
+        ttk.Checkbutton(
+            file_frame, text="Авто", variable=self.auto_window_var, command=self._on_auto_toggle
+        ).grid(row=5, column=2, padx=2, pady=4, sticky="w")
+
+        ttk.Label(file_frame, text="Лимит купола (дБ):").grid(row=6, column=0, sticky="w", pady=4)
+        ttk.Entry(file_frame, textvariable=self.max_peak_limit_var, width=12).grid(row=6, column=1, padx=5, pady=4, sticky="w")
+
+        harm_frame = ttk.LabelFrame(left_panel, text=" Тонкая калибровка гармоник суб-баса ", padding=10)
+        harm_frame.pack(fill="x", pady=6)
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
         harm_frame.columnconfigure(1, weight=1)
 
         self.h2_slider, self.h2_lbl = self._add_slider(
@@ -300,6 +366,40 @@ class AdvancedMaskingStudio(tk.Tk):
             harm_frame, 4, "Допуск потери маскировки:", self.auto_tol_var, 0.0, 1.0
         )
 
+<<<<<<< HEAD
+=======
+        model_frame = ttk.LabelFrame(left_panel, text=" Модель устройства и шума ", padding=10)
+        model_frame.pack(fill="x", pady=6)
+        model_frame.columnconfigure(1, weight=1)
+
+        self.low_limit_slider, self.low_limit_lbl = self._add_slider(
+            model_frame, 0, "Нижняя граница (Гц):", self.low_limit_var, 20.0, 200.0, unit=" Гц")
+
+        self.max_comp_slider, self.max_comp_lbl = self._add_slider(
+            model_frame, 1, "Макс. компенсация АЧХ (30 = выкл.):", self.max_comp_var, 3.0, 30.0)
+
+        ttk.Label(model_frame, text="Исходный шум:").grid(row=2, column=0, sticky="w", pady=5)
+        source_combo = ttk.Combobox(
+            model_frame, textvariable=self.source_type_var, values=self.SOURCE_TYPES, state="readonly", width=32
+        )
+        source_combo.grid(row=2, column=1, columnspan=2, padx=5, pady=5, sticky="w")
+        source_combo.bind("<<ComboboxSelected>>", self._schedule_process)
+
+        ttk.Label(model_frame, text="Объединение файлов:").grid(row=3, column=0, sticky="w", pady=5)
+        combine_combo = ttk.Combobox(
+            model_frame, textvariable=self.combine_var, values=self.COMBINE_MODES, state="readonly", width=32
+        )
+        combine_combo.grid(row=3, column=1, columnspan=2, padx=5, pady=5, sticky="w")
+        combine_combo.bind("<<ComboboxSelected>>", self._schedule_process)
+
+        ttk.Label(model_frame, text="Уровни файлов:").grid(row=4, column=0, sticky="w", pady=5)
+        normalize_combo = ttk.Combobox(
+            model_frame, textvariable=self.normalize_var, values=self.NORMALIZE_MODES, state="readonly", width=32
+        )
+        normalize_combo.grid(row=4, column=1, columnspan=2, padx=5, pady=5, sticky="w")
+        normalize_combo.bind("<<ComboboxSelected>>", self._schedule_process)
+
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
         action_frame = ttk.Frame(left_panel)
         action_frame.pack(fill="x", pady=6)
         ttk.Button(
@@ -462,8 +562,11 @@ class AdvancedMaskingStudio(tk.Tk):
                      label="Усиление фильтра (кривая пресета)")
         self.ax.set_xlim(20, 20000)
 
+<<<<<<< HEAD
         min_y = min(-30, min(gains) - 5) if gains else -30
 
+=======
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
         # Ожидаемый выход маскера: усиление фильтра + спектр источника + АЧХ устройства (макс. = 0 дБ).
         # Показывает, что реально звучит: провал усиления не означает провал маскировки.
         info_out = self._dome_info
@@ -472,11 +575,19 @@ class AdvancedMaskingStudio(tk.Tk):
             on_grid = np.interp(grid, freqs, gains)
             out = on_grid + info_out["source_db"] + info_out["device_rel"]
             out = out - out.max()
+<<<<<<< HEAD
             shown = out > min_y
+=======
+            shown = out > -30.0
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
             self.ax.plot(grid[shown], out[shown], color="#2ca02c", linestyle="--", linewidth=1.6,
                          label="Ожидаемый выход маскера (макс. = 0 дБ)")
             self.ax.legend(loc="upper left", fontsize=8, framealpha=0.9)
 
+<<<<<<< HEAD
+=======
+        min_y = -30
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
         max_y = max(gains) + 5 if gains else 15
         self.ax.set_ylim(min_y, max(max_y, 15))
 
@@ -528,6 +639,7 @@ class AdvancedMaskingStudio(tk.Tk):
         gains = [p[1] for p in points]
         return [(n + 1, freqs[i], gains[i]) for n, i in enumerate(self._find_dome_peaks(gains))]
 
+<<<<<<< HEAD
     def _build_comp_log(self, info):
         """Пояснение к выбранному пределу компенсации АЧХ устройства."""
         rep = info.get("comp_report")
@@ -567,6 +679,8 @@ class AdvancedMaskingStudio(tk.Tk):
             lines.append(f"  Кандидаты (эффективность / потеря слабейшей / доля <80 Гц): {cells}.")
         return "\n".join(lines) + "\n"
 
+=======
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
     def _build_source_log(self, info):
         """Сравнение типов исходного шума для полученной кривой (подсказка, выбор остаётся за вами)."""
         if "target" not in info:
@@ -727,12 +841,18 @@ class AdvancedMaskingStudio(tk.Tk):
             h2_gain = None if auto_h else self.h2_gain_var.get()
             h3_gain = None if auto_h else self.h3_gain_var.get()
             auto_tol = self.auto_tol_var.get()
+<<<<<<< HEAD
             if self.auto_comp_var.get():
                 max_comp = "auto"
             else:
                 max_comp = self.max_comp_var.get()
                 max_comp = None if max_comp >= 29.95 else max_comp
             low_limit = None if self.auto_low_var.get() else self.low_limit_var.get()
+=======
+            max_comp = self.max_comp_var.get()
+            max_comp = None if max_comp >= 29.95 else max_comp
+            low_limit = self.low_limit_var.get()
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
             auto_s = self.auto_slopes_var.get()
             slope_down = None if auto_s else self.slope_down_var.get()
             slope_up = None if auto_s else self.slope_up_var.get()
@@ -806,6 +926,7 @@ class AdvancedMaskingStudio(tk.Tk):
                         self.thr_lbl.config(text=f"{info['threshold']:.1f} дБ")
                     if self.auto_window_var.get():
                         self.filter_length_var.set(str(info["filter_length"]))
+<<<<<<< HEAD
                     if self.auto_low_var.get() and "f_min" in info:
                         self.low_limit_var.set(float(info["f_min"]))
                         self.low_limit_lbl.config(text=f"{info['f_min']:.1f} Гц")
@@ -813,6 +934,8 @@ class AdvancedMaskingStudio(tk.Tk):
                         cap = info.get("max_compensation")
                         self.max_comp_var.set(30.0 if cap is None else float(cap))
                         self.max_comp_lbl.config(text="без предела" if cap is None else f"{cap:.1f} дБ")
+=======
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
                     if self.auto_slopes_var.get() and "slope_down" in info:
                         self.slope_down_var.set(info["slope_down"])
                         self.slope_up_var.set(info["slope_up"])
@@ -836,7 +959,10 @@ class AdvancedMaskingStudio(tk.Tk):
                 )
                 self._update_log(self._build_files_log(info))
                 self._update_log(self._build_source_log(info))
+<<<<<<< HEAD
                 self._update_log(self._build_comp_log(info))
+=======
+>>>>>>> 80a4fbac57a3351d783ea38e295322f4091553cb
                 if "h2_gain" in info:
                     h_mode = "авто" if self.auto_harmonics_var.get() else "вручную"
                     self._update_log(
