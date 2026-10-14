@@ -827,6 +827,9 @@ class AdvancedMaskingStudio(tk.Tk):
                     self._suspend_processing = False
 
             self._update_log("== ГЛОБАЛЬНАЯ ДИНАМИЧЕСКАЯ НОРМАЛИЗАЦИЯ ==\n", clear=True)
+            if info is not None and info.get("skipped_files"):
+                for name, reason in info["skipped_files"]:
+                    self._update_log(f"⚠ Файл пропущен: {name} — {reason}\n")
             if info is not None:
                 thr_mode = "авто" if self.auto_threshold_var.get() else "вручную"
                 win_mode = "авто" if self.auto_window_var.get() else "вручную"
@@ -860,6 +863,9 @@ class AdvancedMaskingStudio(tk.Tk):
             self.save_preset_btn.config(state="normal")
             self.generate_audio_btn.config(state="normal")
         except Exception as error:
+            # Ошибку всегда пишем в лог (иначе при тихом пересчёте график молча остаётся прежним)
+            self._update_log("== ОШИБКА РАСЧЁТА ==\n", clear=True)
+            self._update_log(f"{error}\n")
             if not quiet:
                 messagebox.showerror("Ошибка вычислений", f"Произошла ошибка: {str(error)}")
 

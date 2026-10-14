@@ -138,6 +138,9 @@ def interpolate_speaker_response(speaker_data: dict, target_freq: float) -> floa
 # Психоакустика
 # --------------------------------------------------------------------------------------
 ERB_TO_BARK_SCALE = 0.63      # перевод шкалы ERB-rate в «барк-подобные» единицы для SF
+AUTO_COMP_MIN_DB = 6                 # нижняя граница перебора авто-предела компенсации, дБ
+AUTO_COMP_MAX_LOSS_DB = 1.0          # допустимая потеря покрытия слабейшей полосы при авто-пределе, дБ
+AUTO_COMP_TOL_DB = 0.1               # «равноценные» пределы: не хуже лучшей эффективности более чем на столько, дБ
 HARMONIC_MAX_FREQ = 250.0     # купола гармоник строятся только для пиков суб-баса не выше этой частоты
 PEAK_PROMINENCE_DB = 4.0      # минимальная выделенность пика над окружением
 PEAK_BAND_OCT = 1.0 / 6.0     # полоса сглаживания при поиске пиков
@@ -434,7 +437,7 @@ def build_normalized_preset_dynamic(
     auto_tol_db: float = 0.0,
     file_normalization: str = "peak",
     harmonic_max_freq: float = HARMONIC_MAX_FREQ,
-    max_compensation_db: float | None = None,
+    max_compensation_db: float | str | None = None,
 ):
     """Строит маскирующую кривую фильтра под заданный шум и устройство.
 
@@ -450,8 +453,9 @@ def build_normalized_preset_dynamic(
     h2_gain / h3_gain = None — автоподбор: наибольшие усиления гармоник, не ухудшающие модельную
     маскировку шума более чем на auto_tol_db (по умолчанию 0 — строгий максимум).
     dome_slope_down / dome_slope_up = None — автоподбор склонов по тому же критерию (строгий максимум).
-    max_compensation_db — предел подъёма, которым фильтр компенсирует спад АЧХ устройства (None — без предела);
-    ограничивает нагрузку на динамик на нижней границе, реальный выход на этих частотах будет ниже цели.
+    max_compensation_db — предел подъёма, которым фильтр компенсирует спад АЧХ устройства (None — без предела,
+    "auto" — подбор по модели: см. AUTO_COMP_*); ограничивает нагрузку на динамик на нижней границе,
+    реальный выход на этих частотах будет ниже цели.
     source_pole — полюс исходного шума (0.995 — коричневый, None — белый).
     noise_combine — объединение файлов: "max" (худший случай) или "mean".
     dome_slope_down / dome_slope_up — крутизна нижнего / верхнего склона куполов гармоник.
@@ -505,7 +509,14 @@ def build_normalized_preset_dynamic(
                 "freq": p, "level": float(np.interp(p, grid, band_db)), "infra": bool(p < f_min),
             })
 
-    comp_applied = -device_rel if max_compensation_db is None else np.minimum(-device_rel, float(max_compensation_db))
+    comp_full = -device_rel
+    auto_cap = isinstance(max_compensation_db, str) and max_compensation_db == "auto"
+
+    def comp_for(cap):
+        return comp_full if cap is None else np.minimum(comp_full, float(cap))
+
+    comp_state = {"comp": comp_for(None if auto_cap else max_compensation_db)}
+    comp_report = None
 
     def compose(h2, h3, sd, su):
         """Кривая для заданных усилений гармоник.
@@ -533,7 +544,7 @@ def build_normalized_preset_dynamic(
                 })
 
         # Усиление фильтра: нужный выход маскера минус исходный сигнал минус АЧХ устройства
-        gain = target - source_db + comp_applied
+        gain = target - source_db + comp_state["comp"]
         gain = np.where(reproducible & np.isfinite(gain), gain, -1e9)
 
         # Нормализация: вершина ровно в max_peak_limit
@@ -563,7 +574,7 @@ def build_normalized_preset_dynamic(
     su = DOME_SLOPE_UP if dome_slope_up is None else float(dome_slope_up)
 
     sig_bands = sig_mask if band_db is not None else None
-    if (auto_harmonics or auto_slopes) and peak_info and sig_bands is not None and sig_bands.any():
+    if (auto_harmonics or auto_slopes or auto_cap) and peak_info and sig_bands is not None and sig_bands.any():
         spread_lin = 10.0 ** (_spreading_db(z[:, None] - z[None, :]) / 10.0)
         weights = 10.0 ** (band_db[sig_bands] / 10.0)
         weights = weights / weights.sum()
@@ -610,6 +621,49 @@ def build_normalized_preset_dynamic(
         if auto_harmonics:
             h2, h3 = best_harmonics(sd, su, auto_tol_db)
 
+        if auto_cap:
+            # Предел компенсации АЧХ. Эффективность = покрытие шума (взвешенное энергией шума) на единицу
+            # электрической мощности, подводимой к динамику (до его АЧХ). Допустимы только пределы, при
+            # которых слабейшая полоса теряет не больше AUTO_COMP_MAX_LOSS_DB; из равноценных по
+            # эффективности (в пределах AUTO_COMP_TOL_DB от лучшей) берётся меньший — наименьшая нагрузка.
+            df = np.gradient(grid)
+            need_max = float(comp_full[reproducible].max()) if reproducible.any() else 0.0
+
+            def efficiency(cap):
+                comp_state["comp"] = comp_for(cap)
+                curve = compose(h2, h3, sd, su)[0]
+                out = curve + source_db + device_rel
+                drive_power = 10.0 ** ((curve + source_db) / 10.0) * df
+                total = float(drive_power.sum())
+                excitation = 10.0 * np.log10(spread_lin @ 10.0 ** ((out - 10.0 * np.log10(total)) / 10.0) + 1e-300)
+                d = (excitation - band_db)[sig_bands]
+                return (float((d * weights).sum()), float(d.min()),
+                        100.0 * float(drive_power[grid < 80.0].sum()) / total)
+
+            base_eff, base_min, base_share = efficiency(None)
+            rows = [(cap,) + efficiency(cap) for cap in range(AUTO_COMP_MIN_DB, 31)]
+            comp_report = {"need_max": need_max, "base_share": base_share, "chosen": None,
+                           "search_min": AUTO_COMP_MIN_DB,
+                           "guard_db": AUTO_COMP_MAX_LOSS_DB, "tol_db": AUTO_COMP_TOL_DB, "table": []}
+            if need_max > AUTO_COMP_MIN_DB + 0.5:
+                allowed = [r for r in rows if base_min - r[2] <= AUTO_COMP_MAX_LOSS_DB]
+                best_eff = max(r[1] for r in allowed)
+                near = [r for r in allowed if r[1] >= best_eff - AUTO_COMP_TOL_DB]
+                chosen = min(near, key=lambda r: r[0])
+                if chosen[0] < need_max - 0.5:
+                    comp_report.update(chosen=float(chosen[0]), eff_delta=chosen[1] - base_eff,
+                                       min_loss=base_min - chosen[2], share=chosen[3])
+                comp_report["table"] = [
+                    (r[0], r[1] - base_eff, base_min - r[2], r[3]) for r in rows if r[0] in (6, 8, 10, 12, 15)
+                ]
+            comp_state["comp"] = comp_for(comp_report["chosen"])
+            if auto_harmonics:
+                h2, h3 = best_harmonics(sd, su, auto_tol_db)
+    elif auto_cap:
+        comp_report = {"need_max": float(comp_full[reproducible].max()) if reproducible.any() else 0.0,
+                       "chosen": None, "no_data": True, "table": []}
+        comp_state["comp"] = comp_for(None)
+
     h2_gain, h3_gain, dome_slope_down, dome_slope_up = h2, h3, sd, su
     final, dome_list, global_shift, final_target = compose(h2_gain, h3_gain, sd, su)
 
@@ -627,7 +681,9 @@ def build_normalized_preset_dynamic(
         info = {
             "grid": grid, "f_min": f_min, "f_max": f_max,
             "follow": follow, "domes": dome_list, "peaks": peak_info,
-            "device_comp": comp_applied, "shift": global_shift,
+            "device_comp": comp_state["comp"], "shift": global_shift,
+            "comp_auto": bool(auto_cap), "comp_report": comp_report,
+            "max_compensation": (comp_report["chosen"] if comp_report else (None if max_compensation_db is None else float(max_compensation_db))),
             "source": ("розовый" if (isinstance(source_pole, str) and source_pole == "pink")
                        else "белый" if source_pole is None else "коричневый"),
             "source_key": ("pink" if (isinstance(source_pole, str) and source_pole == "pink")
