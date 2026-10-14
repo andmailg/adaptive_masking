@@ -66,11 +66,10 @@ def load_speaker_response(source, profile_name: str | None = None) -> dict[float
         return _clean_pairs(data)
 
     pairs = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            parts = line.replace(",", " ").replace(";", " ").split()
-            if len(parts) >= 2:
-                pairs.append(parts[:2])
+    for line in _read_text_lines(path):
+        xy = _split_xy(line)
+        if xy is not None:
+            pairs.append(xy)
     return _clean_pairs(pairs)
 
 
@@ -138,7 +137,10 @@ def interpolate_speaker_response(speaker_data: dict, target_freq: float) -> floa
 # Психоакустика
 # --------------------------------------------------------------------------------------
 ERB_TO_BARK_SCALE = 0.63      # перевод шкалы ERB-rate в «барк-подобные» единицы для SF
-HARMONIC_MAX_FREQ = 250.0     # купола гармоник строятся только для пиков суб-баса не выше этой частоты
+AUTO_COMP_MIN_DB = 6                 # нижняя граница перебора авто-предела компенсации, дБ
+AUTO_COMP_MAX_LOSS_DB = 1.0          # допустимая потеря покрытия слабейшей полосы при авто-пределе, дБ
+AUTO_COMP_TOL_DB = 0.1               # «равноценные» пределы: не хуже лучшей эффективности более чем на столько, дБ
+HARMONIC_MAX_RATIO = 1.5      # купола гармоник строятся только для пиков не выше (граница устройства x это число)
 PEAK_PROMINENCE_DB = 4.0      # минимальная выделенность пика над окружением
 PEAK_BAND_OCT = 1.0 / 6.0     # полоса сглаживания при поиске пиков
 GRID_ERB_STEP = 0.1           # шаг сетки по шкале ERB-number
@@ -159,6 +161,13 @@ def _erb_number_inv(e):
 
 def _erb_bandwidth(f):
     return 24.7 * (4.37 * np.asarray(f, dtype=float) / 1000.0 + 1.0)
+
+
+def _a_weighting_db(freqs):
+    """A-взвешивание (дБ): грубая модель чувствительности слуха на тихих уровнях."""
+    f2 = np.asarray(freqs, dtype=float) ** 2
+    ra = (12194.0 ** 2 * f2 ** 2) / ((f2 + 20.6 ** 2) * np.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) * (f2 + 12194.0 ** 2))
+    return 20.0 * np.log10(np.maximum(ra, 1e-12)) + 2.0
 
 
 def _critical_rate(f):
@@ -192,21 +201,54 @@ def source_spectrum_db(freqs, pole="brown_default", sample_rate: float = 44100.0
 # --------------------------------------------------------------------------------------
 # Анализ шума
 # --------------------------------------------------------------------------------------
+def _read_text_lines(path: Path):
+    """Строки текстового файла с учётом кодировки (UTF-8/UTF-16 с BOM/cp1251)."""
+    raw = Path(path).read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = raw.decode("utf-16", errors="replace")
+    else:
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("cp1251", errors="replace")
+    return text.splitlines()
+
+
+def _split_xy(line: str):
+    """Разбор строки «частота уровень»: разделитель — табуляция, «;», пробелы или единственная запятая;
+    десятичный разделитель — точка или запятая (зависит от локали экспорта)."""
+    line = line.replace("\u2212", "-").replace("\u00a0", " ").strip()
+    if not line:
+        return None
+    if "\t" in line:
+        parts = line.split("\t")
+    elif ";" in line:
+        parts = line.split(";")
+    elif " " in line:
+        parts = line.split()
+    elif line.count(",") == 1:
+        parts = line.split(",")
+    else:
+        return None
+    parts = [p.strip().rstrip(",").replace(",", ".") for p in parts if p.strip()]
+    if len(parts) < 2:
+        return None
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+
+
 def _load_noise_file(path: Path):
     freqs, levels = [], []
-    with open(path, "r", encoding="utf-8") as fh:
-        next(fh, None)  # заголовок Audacity
-        for line in fh:
-            parts = line.replace(",", " ").split()
-            if len(parts) < 2:
-                continue
-            try:
-                f, lv = float(parts[0]), float(parts[1])
-            except ValueError:
-                continue
-            if f > 0 and math.isfinite(lv):
-                freqs.append(f)
-                levels.append(lv)
+    for line in _read_text_lines(path):
+        xy = _split_xy(line)         # заголовок и прочие нечисловые строки пропускаются
+        if xy is None:
+            continue
+        f, lv = xy
+        if f > 0 and math.isfinite(lv):
+            freqs.append(f)
+            levels.append(lv)
     return np.array(freqs), np.array(levels)
 
 
@@ -287,18 +329,24 @@ def analyze_noise(file_paths, min_db_threshold, grid_freqs, freq_min, freq_max,
     fine_centers = freq_min * 2.0 ** (np.arange(fine_n + 1) * (octaves / fine_n))
     fine_widths = fine_centers * (2.0 ** (PEAK_BAND_OCT / 2.0) - 2.0 ** (-PEAK_BAND_OCT / 2.0))
 
-    loaded = []
+    loaded, skipped = [], []
     for file_path in file_paths:
         path = Path(file_path)
         if not path.exists():
+            skipped.append((path.name, "файл не найден"))
             continue
-        freqs, levels = _load_noise_file(path)
+        try:
+            freqs, levels = _load_noise_file(path)
+        except OSError as error:
+            skipped.append((path.name, f"не удалось открыть ({error})"))
+            continue
         if len(freqs) < 2:
+            skipped.append((path.name, "нет числовых данных (ожидаются строки «частота уровень»)"))
             continue
         order = np.argsort(freqs)
         loaded.append((path.name, freqs[order], levels[order]))
     if not loaded:
-        return None
+        return {"skipped": skipped, "empty": True}
 
     def in_band(freqs):
         return (freqs >= freq_min) & (freqs <= freq_max)
@@ -372,7 +420,7 @@ def analyze_noise(file_paths, min_db_threshold, grid_freqs, freq_min, freq_max,
     return {
         "band_db": band_db, "significant": significant, "base_peaks": sorted(base_peaks),
         "peaks_details": peaks_details, "file_stats": file_stats,
-        "threshold": top_ref - range_db, "range_db": range_db,
+        "threshold": top_ref - range_db, "range_db": range_db, "skipped": skipped,
     }
 
 
@@ -402,7 +450,7 @@ def get_all_spectrum_peaks_dynamic(file_paths, min_db_threshold):
     """Совместимость: (множество частот пиков, подробности пиков)."""
     grid = _erb_number_inv(np.arange(_erb_number(FREQ_MIN_HZ), _erb_number(FREQ_MAX_HZ), GRID_ERB_STEP))
     res = analyze_noise(file_paths, min_db_threshold, grid, FREQ_MIN_HZ, FREQ_MAX_HZ)
-    if res is None:
+    if res is None or res.get("empty"):
         return set(), []
     return set(res["base_peaks"]), res["peaks_details"]
 
@@ -433,8 +481,9 @@ def build_normalized_preset_dynamic(
     sample_rate: float = 44100.0,
     auto_tol_db: float = 0.0,
     file_normalization: str = "peak",
-    harmonic_max_freq: float = HARMONIC_MAX_FREQ,
-    max_compensation_db: float | None = None,
+    harmonic_max_freq: float | None = None,
+    perceptual_weighting: bool = True,
+    max_compensation_db: float | str | None = None,
 ):
     """Строит маскирующую кривую фильтра под заданный шум и устройство.
 
@@ -450,11 +499,15 @@ def build_normalized_preset_dynamic(
     h2_gain / h3_gain = None — автоподбор: наибольшие усиления гармоник, не ухудшающие модельную
     маскировку шума более чем на auto_tol_db (по умолчанию 0 — строгий максимум).
     dome_slope_down / dome_slope_up = None — автоподбор склонов по тому же критерию (строгий максимум).
-    max_compensation_db — предел подъёма, которым фильтр компенсирует спад АЧХ устройства (None — без предела);
-    ограничивает нагрузку на динамик на нижней границе, реальный выход на этих частотах будет ниже цели.
+    max_compensation_db — предел подъёма, которым фильтр компенсирует спад АЧХ устройства (None — без предела,
+    "auto" — подбор по модели: см. AUTO_COMP_*); ограничивает нагрузку на динамик на нижней границе,
+    реальный выход на этих частотах будет ниже цели.
     source_pole — полюс исходного шума (0.995 — коричневый, None — белый).
     noise_combine — объединение файлов: "max" (худший случай) или "mean".
     dome_slope_down / dome_slope_up — крутизна нижнего / верхнего склона куполов гармоник.
+    harmonic_max_freq — предел частоты пиков, для которых строятся купола гармоник (None — HARMONIC_MAX_RATIO x
+    нижняя граница устройства: выше этого купола бессмысленны). perceptual_weighting — в критерии покрытия
+    полосы шума взвешиваются энергией с учётом чувствительности слуха (A-взвешивание).
     return_info — дополнительно вернуть словарь с разбором формирования купола (для лога и графика).
     """
     response = SpeakerResponse(
@@ -477,7 +530,11 @@ def build_normalized_preset_dynamic(
         spectrum_paths, min_db_threshold, grid, freq_min, freq_max, noise_combine,
         normalize=file_normalization, auto_range_db=auto_range_db,
     )
-    if noise is None:
+    if noise is not None and noise.get("empty") and spectrum_paths:
+        details = "; ".join(f"{name}: {reason}" for name, reason in noise["skipped"])
+        raise ValueError(f"Не удалось прочитать ни один спектр. {details}")
+    skipped_files = noise["skipped"] if noise else []
+    if noise is None or noise.get("empty"):
         band_db, sig_mask, base_peaks, peaks_details, file_stats = None, None, [], [], []
         min_db_threshold = -70.0 if min_db_threshold is None else min_db_threshold
     else:
@@ -505,7 +562,14 @@ def build_normalized_preset_dynamic(
                 "freq": p, "level": float(np.interp(p, grid, band_db)), "infra": bool(p < f_min),
             })
 
-    comp_applied = -device_rel if max_compensation_db is None else np.minimum(-device_rel, float(max_compensation_db))
+    comp_full = -device_rel
+    auto_cap = isinstance(max_compensation_db, str) and max_compensation_db == "auto"
+
+    def comp_for(cap):
+        return comp_full if cap is None else np.minimum(comp_full, float(cap))
+
+    comp_state = {"comp": comp_for(None if auto_cap else max_compensation_db)}
+    comp_report = None
 
     def compose(h2, h3, sd, su):
         """Кривая для заданных усилений гармоник.
@@ -533,7 +597,7 @@ def build_normalized_preset_dynamic(
                 })
 
         # Усиление фильтра: нужный выход маскера минус исходный сигнал минус АЧХ устройства
-        gain = target - source_db + comp_applied
+        gain = target - source_db + comp_state["comp"]
         gain = np.where(reproducible & np.isfinite(gain), gain, -1e9)
 
         # Нормализация: вершина ровно в max_peak_limit
@@ -562,10 +626,13 @@ def build_normalized_preset_dynamic(
     sd = DOME_SLOPE_DOWN if dome_slope_down is None else float(dome_slope_down)
     su = DOME_SLOPE_UP if dome_slope_up is None else float(dome_slope_up)
 
+    if harmonic_max_freq is None:
+        harmonic_max_freq = HARMONIC_MAX_RATIO * f_min
     sig_bands = sig_mask if band_db is not None else None
-    if (auto_harmonics or auto_slopes) and peak_info and sig_bands is not None and sig_bands.any():
+    if (auto_harmonics or auto_slopes or auto_cap) and peak_info and sig_bands is not None and sig_bands.any():
         spread_lin = 10.0 ** (_spreading_db(z[:, None] - z[None, :]) / 10.0)
-        weights = 10.0 ** (band_db[sig_bands] / 10.0)
+        weight_db = band_db[sig_bands] + (_a_weighting_db(grid[sig_bands]) if perceptual_weighting else 0.0)
+        weights = 10.0 ** (weight_db / 10.0)
         weights = weights / weights.sum()
         has_infra = any(pk["infra"] for pk in peak_info)
 
@@ -610,6 +677,49 @@ def build_normalized_preset_dynamic(
         if auto_harmonics:
             h2, h3 = best_harmonics(sd, su, auto_tol_db)
 
+        if auto_cap:
+            # Предел компенсации АЧХ. Эффективность = покрытие шума (взвешенное энергией шума) на единицу
+            # электрической мощности, подводимой к динамику (до его АЧХ). Допустимы только пределы, при
+            # которых слабейшая полоса теряет не больше AUTO_COMP_MAX_LOSS_DB; из равноценных по
+            # эффективности (в пределах AUTO_COMP_TOL_DB от лучшей) берётся меньший — наименьшая нагрузка.
+            df = np.gradient(grid)
+            need_max = float(comp_full[reproducible].max()) if reproducible.any() else 0.0
+
+            def efficiency(cap):
+                comp_state["comp"] = comp_for(cap)
+                curve = compose(h2, h3, sd, su)[0]
+                out = curve + source_db + device_rel
+                drive_power = 10.0 ** ((curve + source_db) / 10.0) * df
+                total = float(drive_power.sum())
+                excitation = 10.0 * np.log10(spread_lin @ 10.0 ** ((out - 10.0 * np.log10(total)) / 10.0) + 1e-300)
+                d = (excitation - band_db)[sig_bands]
+                return (float((d * weights).sum()), float(d.min()),
+                        100.0 * float(drive_power[grid < 80.0].sum()) / total)
+
+            base_eff, base_min, base_share = efficiency(None)
+            rows = [(cap,) + efficiency(cap) for cap in range(AUTO_COMP_MIN_DB, 31)]
+            comp_report = {"need_max": need_max, "base_share": base_share, "chosen": None,
+                           "search_min": AUTO_COMP_MIN_DB,
+                           "guard_db": AUTO_COMP_MAX_LOSS_DB, "tol_db": AUTO_COMP_TOL_DB, "table": []}
+            if need_max > AUTO_COMP_MIN_DB + 0.5:
+                allowed = [r for r in rows if base_min - r[2] <= AUTO_COMP_MAX_LOSS_DB]
+                best_eff = max(r[1] for r in allowed)
+                near = [r for r in allowed if r[1] >= best_eff - AUTO_COMP_TOL_DB]
+                chosen = min(near, key=lambda r: r[0])
+                if chosen[0] < need_max - 0.5:
+                    comp_report.update(chosen=float(chosen[0]), eff_delta=chosen[1] - base_eff,
+                                       min_loss=base_min - chosen[2], share=chosen[3])
+                comp_report["table"] = [
+                    (r[0], r[1] - base_eff, base_min - r[2], r[3]) for r in rows if r[0] in (6, 8, 10, 12, 15)
+                ]
+            comp_state["comp"] = comp_for(comp_report["chosen"])
+            if auto_harmonics:
+                h2, h3 = best_harmonics(sd, su, auto_tol_db)
+    elif auto_cap:
+        comp_report = {"need_max": float(comp_full[reproducible].max()) if reproducible.any() else 0.0,
+                       "chosen": None, "no_data": True, "table": []}
+        comp_state["comp"] = comp_for(None)
+
     h2_gain, h3_gain, dome_slope_down, dome_slope_up = h2, h3, sd, su
     final, dome_list, global_shift, final_target = compose(h2_gain, h3_gain, sd, su)
 
@@ -627,7 +737,9 @@ def build_normalized_preset_dynamic(
         info = {
             "grid": grid, "f_min": f_min, "f_max": f_max,
             "follow": follow, "domes": dome_list, "peaks": peak_info,
-            "device_comp": comp_applied, "shift": global_shift,
+            "device_comp": comp_state["comp"], "shift": global_shift,
+            "comp_auto": bool(auto_cap), "comp_report": comp_report,
+            "max_compensation": (comp_report["chosen"] if comp_report else (None if max_compensation_db is None else float(max_compensation_db))),
             "source": ("розовый" if (isinstance(source_pole, str) and source_pole == "pink")
                        else "белый" if source_pole is None else "коричневый"),
             "source_key": ("pink" if (isinstance(source_pole, str) and source_pole == "pink")
@@ -636,8 +748,8 @@ def build_normalized_preset_dynamic(
             "source_db": source_db, "device_rel": device_rel,
             "max_peak_limit": float(max_peak_limit), "min_gain": float(min_gain),
             "threshold": float(min_db_threshold), "filter_length": int(filter_length),
-            "file_stats": file_stats, "normalization": file_normalization,
-            "harmonic_max_freq": float(harmonic_max_freq),
+            "file_stats": file_stats, "normalization": file_normalization, "skipped_files": skipped_files,
+            "harmonic_max_freq": float(harmonic_max_freq), "perceptual_weighting": bool(perceptual_weighting),
             "h2_gain": float(h2_gain), "h3_gain": float(h3_gain), "auto_harmonics": bool(auto_harmonics),
             "slope_down": float(sd), "slope_up": float(su), "auto_slopes": bool(auto_slopes),
         }
