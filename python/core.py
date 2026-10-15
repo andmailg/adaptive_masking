@@ -17,7 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
-FREQ_MIN_HZ = 20
+FREQ_MIN_HZ = 10              # нижняя граница анализа спектра по умолчанию (инфразвуковые пики, напр. 15 Гц)
+MAX_HARMONIC_ORDER = 8        # старшая допустимая гармоника при подборе (пики ниже границы/8 не учитываются)
 FREQ_MAX_HZ = 20000
 MAX_EXTRAPOLATION_DB_PER_OCT = 24.0
 
@@ -365,10 +366,16 @@ def analyze_noise(file_paths, min_db_threshold, grid_freqs, freq_min, freq_max,
         thr_file = top - range_db            # исходная шкала файла
         thr_norm = thr_file - ref            # шкала после приведения
 
-        bands.append(_band_levels_db(freqs, norm, grid_freqs, widths))
-        sig_grid.append(_window_max_db(freqs, norm, grid_freqs, widths) >= thr_norm)
-        fs = _band_levels_db(freqs, norm, fine_centers, fine_widths)
-        fp = _window_max_db(freqs, norm, fine_centers, fine_widths)
+        band_n = _band_levels_db(freqs, norm, grid_freqs, widths)
+        bands.append(band_n)
+        # Значима полоса, если в ней есть пик выше порога файла ИЛИ суммарный уровень полосы лежит не ниже
+        # (максимальная полоса файла − диапазон): второе условие захватывает широкополосный шум, у которого
+        # ни один отдельный бин не выделяется, а энергия в полосе велика
+        sig_peak = _window_max_db(freqs, norm, grid_freqs, widths) >= thr_norm
+        sig_grid.append(sig_peak | (band_n >= float(band_n.max()) - range_db))
+        fw = np.maximum(fine_widths, 3.0 * float(np.median(np.diff(freqs))))
+        fs = _band_levels_db(freqs, norm, fine_centers, fw)
+        fp = _window_max_db(freqs, norm, fine_centers, fw)
         fine_sums.append(fs)
         sig_fine.append(fp >= thr_norm)
         norm_files.append((freqs, norm))
@@ -558,8 +565,14 @@ def build_normalized_preset_dynamic(
         significant = sig_mask & reproducible
         follow = np.where(significant, band_db, -np.inf)
         for p in base_peaks:
+            infra = bool(p < f_min)
+            # Невоспроизводимый пик представляют две ближайшие гармоники, лежащие в диапазоне устройства:
+            # 2-я и 3-я для 35–64 Гц, 5-я и 6-я для 15 Гц и т.д.
+            first = max(2, int(math.ceil(f_min / p))) if infra else 2
+            orders = [first, first + 1] if infra else [2]
             peak_info.append({
-                "freq": p, "level": float(np.interp(p, grid, band_db)), "infra": bool(p < f_min),
+                "freq": p, "level": float(np.interp(p, grid, band_db)), "infra": infra,
+                "orders": orders if first <= MAX_HARMONIC_ORDER else [],
             })
 
     comp_full = -device_rel
@@ -582,7 +595,7 @@ def build_normalized_preset_dynamic(
             p, level = pk["freq"], pk["level"]
             if p > harmonic_max_freq:
                 continue
-            harmonics = ((2, h2), (3, h3)) if pk["infra"] else ((2, h2),)
+            harmonics = tuple(zip(pk["orders"], (h2, h3)))
             for order, amp in harmonics:
                 fc = p * order
                 if fc > f_max:
