@@ -44,6 +44,7 @@ class AdvancedMaskingStudio(tk.Tk):
         "auto_slopes": True,
         "max_comp": 30.0,
         "auto_low": True,
+        "analysis_min": 10.0,
         "auto_comp": True,
         "auto_tol": 0.0,
     }
@@ -51,8 +52,8 @@ class AdvancedMaskingStudio(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Advanced Noise Masking Studio (Monolithic Fixed)")
-        self.geometry("1020x980")
-        self.minsize(980, 860)
+        self.geometry("1020x940")
+        self.minsize(980, 640)
 
         self.json_path = tk.StringVar()
         self.spectrum_files = []
@@ -82,6 +83,7 @@ class AdvancedMaskingStudio(tk.Tk):
         self.auto_slopes_var = tk.BooleanVar(value=d["auto_slopes"])
         self.max_comp_var = tk.DoubleVar(value=d["max_comp"])
         self.auto_low_var = tk.BooleanVar(value=d["auto_low"])
+        self.analysis_min_var = tk.DoubleVar(value=d["analysis_min"])
         self.auto_comp_var = tk.BooleanVar(value=d["auto_comp"])
         self.source_type_var = tk.StringVar(value=self.SOURCE_TYPES[0])
         self.combine_var = tk.StringVar(value=self.COMBINE_MODES[0])
@@ -149,6 +151,7 @@ class AdvancedMaskingStudio(tk.Tk):
             self.auto_slopes_var.set(d["auto_slopes"])
             self.max_comp_var.set(d["max_comp"])
             self.auto_low_var.set(d["auto_low"])
+            self.analysis_min_var.set(d["analysis_min"])
             self.auto_comp_var.set(d["auto_comp"])
             self.source_type_var.set(self.SOURCE_TYPES[0])
             self.combine_var.set(self.COMBINE_MODES[0])
@@ -191,8 +194,59 @@ class AdvancedMaskingStudio(tk.Tk):
         left_panel = ttk.Frame(self, padding=10)
         left_panel.pack(side="left", fill="both", expand=True)
 
+        # Нижняя часть панели (кнопки, лог) создаётся первой и прижимается к низу: при малой высоте окна
+        # прокручиваются параметры сверху, а кнопки экспорта остаются на виду.
+        btn_frame = ttk.Frame(left_panel)
+        btn_frame.pack(side="bottom", fill="x", pady=6)
+
+        self.save_preset_btn = ttk.Button(btn_frame, text="Экспорт пресета .txt", command=self._save_preset_file, state="disabled")
+        self.save_preset_btn.pack(side="left", fill="x", expand=True, padx=2)
+
+        self.generate_audio_btn = ttk.Button(btn_frame, text="Сгенерировать шум .mp3", command=self._generate_audio_file, state="disabled")
+        self.generate_audio_btn.pack(side="right", fill="x", expand=True, padx=2)
+
+        output_frame = ttk.LabelFrame(left_panel, text=" Лог и диагностика нормализации ", padding=10)
+        output_frame.pack(side="bottom", fill="x", pady=4)
+
+        scrollbar = ttk.Scrollbar(output_frame)
+        scrollbar.pack(side="right", fill="y")
+
+        self.log_text = tk.Text(
+            output_frame, wrap="word", height=9, bg="#f8f9fa", state="disabled", yscrollcommand=scrollbar.set
+        )
+        self.log_text.pack(fill="both", expand=True)
+        scrollbar.config(command=self.log_text.yview)
+
+        action_frame = ttk.Frame(left_panel)
+        action_frame.pack(side="bottom", fill="x", pady=6)
+        ttk.Button(
+            action_frame, text="Рассчитать и нормализовать АЧХ", command=lambda: self._process_data(quiet=False)
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            action_frame, text="Сбросить по умолчанию", command=self._reset_defaults
+        ).pack(side="left", padx=(6, 0))
+
+        # Параметры (разделы 1–4) — в прокручиваемой области
+        params_holder = ttk.Frame(left_panel)
+        params_holder.pack(side="top", fill="both", expand=True)
+        params_canvas = tk.Canvas(params_holder, highlightthickness=0, borderwidth=0)
+        params_scroll = ttk.Scrollbar(params_holder, orient="vertical", command=params_canvas.yview)
+        params = ttk.Frame(params_canvas)
+        params_window = params_canvas.create_window((0, 0), window=params, anchor="nw")
+        params.bind("<Configure>", lambda e: params_canvas.configure(scrollregion=params_canvas.bbox("all")))
+        params_canvas.bind("<Configure>", lambda e: params_canvas.itemconfigure(params_window, width=e.width))
+        params_canvas.configure(yscrollcommand=params_scroll.set)
+        params_canvas.pack(side="left", fill="both", expand=True)
+        params_scroll.pack(side="right", fill="y")
+
+        def _on_wheel(event):
+            params_canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        params_canvas.bind("<Enter>", lambda e: params_canvas.bind_all("<MouseWheel>", _on_wheel))
+        params_canvas.bind("<Leave>", lambda e: params_canvas.unbind_all("<MouseWheel>"))
+
         # ---- 1. Устройство воспроизведения ----
-        device_frame = ttk.LabelFrame(left_panel, text=" 1. Устройство воспроизведения ", padding=10)
+        device_frame = ttk.LabelFrame(params, text=" 1. Устройство воспроизведения ", padding=10)
         device_frame.pack(fill="x", pady=4)
         device_frame.columnconfigure(1, weight=1)
 
@@ -219,7 +273,7 @@ class AdvancedMaskingStudio(tk.Tk):
         ).grid(row=2, column=3, padx=2, sticky="w")
 
         # ---- 2. Анализируемый шум (спектры) ----
-        noise_frame = ttk.LabelFrame(left_panel, text=" 2. Анализируемый шум (спектры) ", padding=10)
+        noise_frame = ttk.LabelFrame(params, text=" 2. Анализируемый шум (спектры) ", padding=10)
         noise_frame.pack(fill="x", pady=4)
         noise_frame.columnconfigure(1, weight=1)
 
@@ -252,8 +306,11 @@ class AdvancedMaskingStudio(tk.Tk):
         normalize_combo.grid(row=4, column=1, columnspan=2, padx=5, pady=5, sticky="w")
         normalize_combo.bind("<<ComboboxSelected>>", self._schedule_process)
 
+        self.analysis_min_slider, self.analysis_min_lbl = self._add_slider(
+            noise_frame, 5, "Нижняя граница анализа (Гц):", self.analysis_min_var, 5.0, 30.0, unit=" Гц")
+
         # ---- 3. Генерируемый шум и фильтр ----
-        masker_frame = ttk.LabelFrame(left_panel, text=" 3. Генерируемый шум и фильтр ", padding=10)
+        masker_frame = ttk.LabelFrame(params, text=" 3. Генерируемый шум и фильтр ", padding=10)
         masker_frame.pack(fill="x", pady=4)
         masker_frame.columnconfigure(1, weight=1)
 
@@ -278,14 +335,14 @@ class AdvancedMaskingStudio(tk.Tk):
         ).grid(row=3, column=2, padx=2, sticky="w")
 
         # ---- 4. Калибровка суб-баса ----
-        harm_frame = ttk.LabelFrame(left_panel, text=" 4. Калибровка суб-баса (гармоники) ", padding=10)
+        harm_frame = ttk.LabelFrame(params, text=" 4. Калибровка суб-баса (гармоники) ", padding=10)
         harm_frame.pack(fill="x", pady=4)
         harm_frame.columnconfigure(1, weight=1)
 
         self.h2_slider, self.h2_lbl = self._add_slider(
-            harm_frame, 0, "Усиление 2-й гармоники:", self.h2_gain_var, 0.0, 15.0)
+            harm_frame, 0, "Усиление 2-й гарм. (первая выше границы):", self.h2_gain_var, 0.0, 15.0)
         self.h3_slider, self.h3_lbl = self._add_slider(
-            harm_frame, 1, "Усиление 3-й гармоники:", self.h3_gain_var, 0.0, 15.0)
+            harm_frame, 1, "Усиление 3-й гарм. (вторая выше границы):", self.h3_gain_var, 0.0, 15.0)
         self.slope_down_slider, self.slope_down_lbl = self._add_slider(
             harm_frame, 2, "Крутизна нижнего склона:", self.slope_down_var, 2.0, 16.0, unit="")
         self.slope_up_slider, self.slope_up_lbl = self._add_slider(
@@ -299,36 +356,6 @@ class AdvancedMaskingStudio(tk.Tk):
         self.tol_slider, self.tol_lbl = self._add_slider(
             harm_frame, 4, "Допуск потери маскировки:", self.auto_tol_var, 0.0, 1.0
         )
-
-        action_frame = ttk.Frame(left_panel)
-        action_frame.pack(fill="x", pady=6)
-        ttk.Button(
-            action_frame, text="Рассчитать и нормализовать АЧХ", command=lambda: self._process_data(quiet=False)
-        ).pack(side="left", fill="x", expand=True)
-        ttk.Button(
-            action_frame, text="Сбросить по умолчанию", command=self._reset_defaults
-        ).pack(side="left", padx=(6, 0))
-
-        output_frame = ttk.LabelFrame(left_panel, text=" Лог и диагностика нормализации ", padding=10)
-        output_frame.pack(fill="both", expand=True, pady=4)
-
-        scrollbar = ttk.Scrollbar(output_frame)
-        scrollbar.pack(side="right", fill="y")
-
-        self.log_text = tk.Text(
-            output_frame, wrap="word", height=6, bg="#f8f9fa", state="disabled", yscrollcommand=scrollbar.set
-        )
-        self.log_text.pack(fill="both", expand=True)
-        scrollbar.config(command=self.log_text.yview)
-
-        btn_frame = ttk.Frame(left_panel)
-        btn_frame.pack(fill="x", pady=6)
-
-        self.save_preset_btn = ttk.Button(btn_frame, text="Экспорт пресета .txt", command=self._save_preset_file, state="disabled")
-        self.save_preset_btn.pack(side="left", fill="x", expand=True, padx=2)
-
-        self.generate_audio_btn = ttk.Button(btn_frame, text="Сгенерировать шум .mp3", command=self._generate_audio_file, state="disabled")
-        self.generate_audio_btn.pack(side="right", fill="x", expand=True, padx=2)
 
         self.right_panel = ttk.LabelFrame(self, text=" Визуализация кривой фильтра ", padding=10)
         self.right_panel.pack(side="right", fill="both", expand=True, padx=10, pady=10)
@@ -460,7 +487,7 @@ class AdvancedMaskingStudio(tk.Tk):
 
         self.ax.plot(freqs, gains, color="#1f77b4", linewidth=2, marker=".", markersize=3,
                      label="Усиление фильтра (кривая пресета)")
-        self.ax.set_xlim(20, 20000)
+        self.ax.set_xlim(10, 20000)
 
         min_y = min(-30, min(gains) - 5) if gains else -30
 
@@ -489,23 +516,28 @@ class AdvancedMaskingStudio(tk.Tk):
                 ha="center", va="bottom", fontsize=9, color="#d62728", fontweight="bold",
             )
         if graph_peaks:
-            # Расшифровка номеров — в углу графика, где нет кривой, чтобы подписи не налезали
-            legend = "\n".join(f"{n} — {f} Гц, {round(g, 1) + 0.0:.1f} дБ" for n, f, g in graph_peaks)
+            # Расшифровка номеров — за пределами графика справа, чтобы не закрывать кривую
+            self.fig.subplots_adjust(right=0.80)
+            legend = "\n".join(f"{n} — {f} Гц, {round(g, 1) + 0.0:.1f} дБ" for n, f, g in graph_peaks[:16])
+            if len(graph_peaks) > 16:
+                legend += f"\n… ещё {len(graph_peaks) - 16}"
             self.ax.text(
-                0.985, 0.975, "Вершины:\n" + legend, transform=self.ax.transAxes, ha="right", va="top",
-                fontsize=8, color="#d62728", bbox=dict(boxstyle="round", fc="white", ec="#d62728", alpha=0.9),
+                1.015, 1.0, "Вершины:\n" + legend, transform=self.ax.transAxes, ha="left", va="top",
+                fontsize=7, color="#d62728", bbox=dict(boxstyle="round", fc="white", ec="#d62728", alpha=0.9),
             )
+        else:
+            self.fig.subplots_adjust(right=0.95)
 
         # Как сформирован купол: пики шума (оранжевые) и центры куполов гармоник (серые)
         info = self._dome_info
         if info is not None:
             for p in info["peaks"]:
-                if 20 <= p["freq"] <= 20000:
+                if 10 <= p["freq"] <= 20000:
                     self.ax.axvline(p["freq"], color="#ff7f0e", linestyle="--", linewidth=1.2, alpha=0.8)
                     self.ax.text(p["freq"], min_y + 0.8, f"шум {p['freq']} Гц", rotation=90, fontsize=7,
                                  color="#ff7f0e", ha="right", va="bottom")
             for d in info["domes"]:
-                if 20 <= d["center"] <= 20000:
+                if 10 <= d["center"] <= 20000:
                     self.ax.axvline(d["center"], color="#7f7f7f", linestyle=":", linewidth=1.0, alpha=0.8)
                     self.ax.text(d["center"], min_y + 0.8, d["label"], rotation=90, fontsize=7,
                                  color="#555555", ha="right", va="bottom")
@@ -621,7 +653,10 @@ class AdvancedMaskingStudio(tk.Tk):
             level = best.get(p["freq"])
             level_txt = f" ({level} дБ)" if level is not None else ""
             if p["infra"]:
-                lines.append(f"• Шум {p['freq']} Гц{level_txt}: ниже диапазона устройства -> купола гармоник.")
+                orders = ", ".join(f"{o}×" for o in p.get("orders", []))
+                tail = f" ({orders} -> {', '.join(str(o * p['freq']) for o in p.get('orders', []))} Гц)" if orders else \
+                    " (гармоники слишком высокого порядка, не используются)"
+                lines.append(f"• Шум {p['freq']} Гц{level_txt}: ниже диапазона устройства -> купола гармоник{tail}.")
             elif p["freq"] > info.get("harmonic_max_freq", 1e9):
                 lines.append(f"• Шум {p['freq']} Гц{level_txt}: воспроизводим -> маскируется напрямую.")
             else:
@@ -733,6 +768,7 @@ class AdvancedMaskingStudio(tk.Tk):
                 max_comp = self.max_comp_var.get()
                 max_comp = None if max_comp >= 29.95 else max_comp
             low_limit = None if self.auto_low_var.get() else self.low_limit_var.get()
+            analysis_min = int(round(self.analysis_min_var.get()))
             auto_s = self.auto_slopes_var.get()
             slope_down = None if auto_s else self.slope_down_var.get()
             slope_up = None if auto_s else self.slope_up_var.get()
@@ -781,6 +817,7 @@ class AdvancedMaskingStudio(tk.Tk):
                 auto_tol_db=auto_tol,
                 file_normalization=norm_mode,
                 max_compensation_db=max_comp,
+                freq_min=analysis_min,
                 source_pole=source_pole,
                 noise_combine=noise_combine,
                 dome_slope_down=slope_down,
