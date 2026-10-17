@@ -2,7 +2,7 @@
 
 Алгоритм:
   1. Спектры шума -> уровни в полосах ERB (огибающая «худшего случая» по всем файлам).
-  2. АЧХ устройства -> рабочий диапазон и компенсация.
+  2. АЧХ устройства -> рабочий диапазон (низ — по басовому максимуму АЧХ минус AUTO_LOW_CUTOFF_DB) и компенсация.
   3. Воспроизводимая часть шума маскируется кривой, повторяющей уровень шума в полосе ERB.
   4. Для невоспроизводимых пиков строятся купола 2-й и 3-й гармоник (виртуальный бас):
      уровень купола = уровень шума в полосе пика + усиление гармоники, склоны
@@ -21,6 +21,10 @@ FREQ_MIN_HZ = 10              # нижняя граница анализа сп�
 MAX_HARMONIC_ORDER = 8        # старшая допустимая гармоника при подборе (пики ниже границы/8 не учитываются)
 FREQ_MAX_HZ = 20000
 MAX_EXTRAPOLATION_DB_PER_OCT = 24.0
+AUTO_HARMONIC_MAX_DB = 15     # верхняя граница перебора усилений гармоник, дБ
+AUTO_LOW_CUTOFF_DB = 10.0     # «рабочий» низ устройства: АЧХ не ниже басового максимума минус это число, дБ
+AUTO_UNIFORM_WEIGHT = 0.3     # доля равномерных весов полос в критерии автоподбора куполов
+LOW_REFERENCE_MAX_HZ = 1000   # басовый максимум ищется в диапазоне от первой точки АЧХ до этой частоты
 
 
 def _clean_pairs(pairs) -> dict[float, float]:
@@ -116,6 +120,31 @@ class SpeakerResponse:
         lo = max(f_lo, int(math.ceil(self.freqs[0])))
         hi = min(f_hi, int(math.floor(self.freqs[-1])))
         return (lo, hi) if lo < hi else (f_lo, f_hi)
+
+    def usable_low_edge(self, cutoff_db: float = AUTO_LOW_CUTOFF_DB) -> float | None:
+        """Нижняя граница, с которой устройство реально воспроизводит бас.
+
+        Опорой служит максимум АЧХ в басо-средней области (до LOW_REFERENCE_MAX_HZ), а не глобальный максимум:
+        у наушников подъём на 3 кГц иначе «занижал» бы весь бас. Идём вниз от этого максимума и находим,
+        где АЧХ падает ниже опоры на cutoff_db (линейная интерполяция по лог-частоте). Если до первой точки
+        профиля спада нет — возвращаем None (граница = первая измеренная точка)."""
+        if self.empty or len(self.freqs) < 2:
+            return None
+        zone = [(f, v) for f, v in zip(self.freqs, self.levels) if f <= LOW_REFERENCE_MAX_HZ]
+        if not zone:
+            return None
+        f_ref, v_ref = max(zone, key=lambda fv: fv[1])
+        threshold = v_ref - cutoff_db
+        below = [(f, v) for f, v in zip(self.freqs, self.levels) if f < f_ref]
+        edge = None
+        prev_f, prev_v = f_ref, v_ref
+        for f, v in reversed(below):
+            if v < threshold:
+                t = (prev_v - threshold) / (prev_v - v)
+                edge = prev_f * (f / prev_f) ** t
+                break
+            prev_f, prev_v = f, v
+        return edge
 
     def usable_band(self, cutoff_db: float, f_lo: int, f_hi: int) -> tuple[int, int]:
         """Границы рабочего диапазона: где АЧХ не ниже опорного уровня + cutoff_db."""
@@ -491,20 +520,22 @@ def build_normalized_preset_dynamic(
     harmonic_max_freq: float | None = None,
     perceptual_weighting: bool = True,
     max_compensation_db: float | str | None = None,
+    low_cutoff_db: float | None = AUTO_LOW_CUTOFF_DB,
 ):
     """Строит маскирующую кривую фильтра под заданный шум и устройство.
 
     Параметры АЧХ: speaker_response (dict / пары / путь) либо profile_path (+profile_name).
     min_db_threshold — шум в полосе ниже этого уровня маскировать не нужно.
     h2_gain, h3_gain — высота куполов 2-й и 3-й гармоник (дБ); масштабируется уровнем шума пика.
-    freq_low — нижняя граница воспроизведения, Гц (по умолчанию — первая точка АЧХ из профиля).
-    Пики ниже этой границы считаются невоспроизводимыми (получают купола 2-й и 3-й гармоник).
+    freq_low — нижняя граница воспроизведения, Гц. По умолчанию (None) — рабочий низ устройства: частота, на которой
+    АЧХ падает ниже своего басового максимума на low_cutoff_db (но не ниже первой точки профиля); low_cutoff_db=None —
+    прежнее поведение (первая точка профиля). Пики ниже границы считаются невоспроизводимыми (купола 2-й и 3-й гармоник).
     min_db_threshold=None — автопорог: самый сильный бин шума минус auto_range_db. Порог применяется к каждому
     файлу относительно его собственного максимума (тихая запись не теряет пики), min_db_threshold задаёт
     диапазон относительно самого громкого файла. file_normalization: "peak" | "floor" | "none".
     filter_length=None — окно фильтра подбирается по разрешению на самой низкой частоте шума.
     h2_gain / h3_gain = None — автоподбор: наибольшие усиления гармоник, не ухудшающие модельную
-    маскировку шума более чем на auto_tol_db (по умолчанию 0 — строгий максимум).
+    маскировку шума более чем на auto_tol_db (среднеквадратичный разброс запаса маскировки, дБ; 0 — строгий максимум).
     dome_slope_down / dome_slope_up = None — автоподбор склонов по тому же критерию (строгий максимум).
     max_compensation_db — предел подъёма, которым фильтр компенсирует спад АЧХ устройства (None — без предела,
     "auto" — подбор по модели: см. AUTO_COMP_*); ограничивает нагрузку на динамик на нижней границе,
@@ -528,6 +559,12 @@ def build_normalized_preset_dynamic(
     f_min, f_max = response.measured_band(freq_min, freq_max)
     if freq_low is not None:
         f_min = min(max(freq_min, int(round(freq_low))), f_max - 1)
+    elif low_cutoff_db is not None:
+        # Авто: рабочий низ — где бас устройства ещё в пределах low_cutoff_db от его басового максимума.
+        # Ниже этой частоты пики шума представляются гармониками, а не прямой (слабой) маскировкой.
+        edge = response.usable_low_edge(low_cutoff_db)
+        if edge is not None:
+            f_min = min(max(f_min, int(math.ceil(edge))), f_max - 1)
 
     # Сетка по шкале ERB
     grid = _erb_number_inv(np.arange(_erb_number(freq_min), _erb_number(freq_max) + 1e-9, GRID_ERB_STEP))
@@ -649,11 +686,22 @@ def build_normalized_preset_dynamic(
         weights = weights / weights.sum()
         has_infra = any(pk["infra"] for pk in peak_info)
 
+        # Смесь энергетических весов (слышимо громкие полосы) и равномерных (чтобы слабые полосы, например
+        # инфразвуковые, не выпадали из критерия совсем)
+        n_sig = int(sig_bands.sum())
+        fit_weights = (1.0 - AUTO_UNIFORM_WEIGHT) * weights + AUTO_UNIFORM_WEIGHT / n_sig
+
         def coverage(a2, a3, down, up):
+            """Качество маскировки = минус среднеквадратичный разброс запаса «возбуждение маскера − шум»
+            по значимым полосам (дБ, с весами). Громкость роли не играет (общий сдвиг вычитается): хорошая
+            кривая даёт ОДИНАКОВЫЙ запас над шумом везде. Недобор (слышимый шум) и перебор (лишняя мощность,
+            шипение) штрафуются одинаково, поэтому оптимум лежит внутри сетки, а не на её краю."""
             curve, _, _, _ = compose(a2, a3, down, up)
             out = curve + source_db + device_rel
             excitation = 10.0 * np.log10(spread_lin @ 10.0 ** (out / 10.0) + 1e-300)
-            return float(((excitation - band_db)[sig_bands] * weights).sum())
+            d = (excitation - band_db)[sig_bands]
+            mean = float((d * fit_weights).sum())
+            return -math.sqrt(float((((d - mean) ** 2) * fit_weights).sum()))
 
         def best_harmonics(down, up, tol):
             def search(v2, v3):
@@ -663,18 +711,19 @@ def build_normalized_preset_dynamic(
                 chosen = max(good, key=lambda sc: (sc[1] + sc[2], sc[2]))
                 return chosen[1], chosen[2]
 
-            h3_coarse = [float(v) for v in range(0, 16)] if has_infra else [0.0]
-            c2, c3 = search([float(v) for v in range(0, 16)], h3_coarse)
+            h_max = float(AUTO_HARMONIC_MAX_DB)
+            h3_coarse = [float(v) for v in range(0, AUTO_HARMONIC_MAX_DB + 1)] if has_infra else [0.0]
+            c2, c3 = search([float(v) for v in range(0, AUTO_HARMONIC_MAX_DB + 1)], h3_coarse)
             near = np.arange(-1.0, 1.01, 0.25)
-            fine2 = sorted({max(0.0, min(15.0, c2 + d)) for d in near})
-            fine3 = sorted({max(0.0, min(15.0, c3 + d)) for d in near}) if has_infra else [0.0]
+            fine2 = sorted({max(0.0, min(h_max, c2 + d)) for d in near})
+            fine3 = sorted({max(0.0, min(h_max, c3 + d)) for d in near}) if has_infra else [0.0]
             r2, r3 = search(fine2, fine3)
             return round(r2, 2), round(r3, 2)
 
         if auto_slopes:
             # Склоны и гармоники связаны, поэтому для каждой пары склонов гармоники подбираются заново
             # (грубо, шаг 2 дБ); итоговые гармоники затем уточняются для лучшей пары
-            coarse = [float(v) for v in range(0, 16, 2)]
+            coarse = [float(v) for v in range(0, AUTO_HARMONIC_MAX_DB + 1, 2)]
             coarse3 = coarse if has_infra else [0.0]
 
             def slope_score(down, up):

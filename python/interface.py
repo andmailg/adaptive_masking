@@ -1,5 +1,6 @@
 import inspect
 import json
+import math
 import random
 import struct
 import threading
@@ -15,7 +16,10 @@ from matplotlib.figure import Figure
 from pydub import AudioSegment
 
 # Импортируем функцию из математического ядра (core.py)
-from core import build_normalized_preset_dynamic, compare_source_types, explain_frequency, load_speaker_response
+from core import (
+    AUTO_LOW_CUTOFF_DB, SpeakerResponse, build_normalized_preset_dynamic, compare_source_types,
+    explain_frequency, load_speaker_response,
+)
 
 AudioSegment.converter = im_ffmpeg.get_ffmpeg_exe()
 
@@ -384,7 +388,7 @@ class AdvancedMaskingStudio(tk.Tk):
             self.json_path.set(self.device_names[0])
 
     def _sync_low_limit(self):
-        """Нижняя граница по умолчанию — первая точка АЧХ выбранного профиля."""
+        """Нижняя граница по умолчанию: в режиме «Авто» — рабочий низ устройства (бас не слабее максимума на 10 дБ), иначе — первая точка АЧХ профиля."""
         try:
             name = self.json_path.get()
             if name in self.device_names:
@@ -396,6 +400,11 @@ class AdvancedMaskingStudio(tk.Tk):
                 response = load_speaker_response(str(path))
             if response:
                 low = float(min(response))
+                if self.auto_low_var.get():
+                    # Авто: рабочий низ — где бас устройства не слабее его басового максимума на AUTO_LOW_CUTOFF_DB
+                    edge = SpeakerResponse(response).usable_low_edge(AUTO_LOW_CUTOFF_DB)
+                    if edge is not None:
+                        low = max(low, float(math.ceil(edge)))
                 self.low_limit_var.set(low)
                 self.low_limit_lbl.config(text=f"{low:.1f} Гц")
         except Exception:
